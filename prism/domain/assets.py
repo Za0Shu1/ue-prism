@@ -465,3 +465,296 @@ def get_asset_chain(asset_path, direction="uses", scope="game", with_meta=True, 
     if scope == "game" and (n_engine or n_script):
         result["note"] = "已过滤引擎/Script 依赖（迁移仅需 /Game）；scope=all 可含全量"
     return result
+
+# ---------------- scan_orphan_assets：孤儿资产扫描（只读·深度分析 P0） ----------------
+# 复用顶部 helper：_registry/_class_name/_disk_size/_registry_graph/_name_str + envelope。
+# 假阳性排除/可信度分级是核心难点：见 _orphan_exclusion / _orphan_confidence（纯逻辑，无引擎可测）。
+
+_WP_MARKERS = ("__ExternalActors__", "__ExternalObjects__")
+# 工程内常见『按名字/路径动态加载』或『本就是入口』的目录/类型线索，命中则孤儿可信度降为 suspect。
+_SCRATCH_HINTS = ("/Editor/", "/Debug/", "/Old/", "/Backup/", "/Test/", "/Temp/", "/Draft/")
+
+
+def _orphan_exclusion(class_name, package):
+    """该 /Game 包是否属于『不该被当成孤儿』的固有类型？返回 reason 字符串或 None。纯逻辑。"""
+    if not package.startswith("/Game/"):
+        return "non_game"
+    if class_name == "World":
+        return "level_root"          # 关卡是运行时入口，不靠被引用
+    for mk in _WP_MARKERS:
+        if mk in package:
+            return "external_wp"      # World Partition 外部 actor/obj，由 map 隐式加载
+    leaf = package.rpartition("/")[2]
+    if class_name == "Redirector" or "_Redirector" in leaf or leaf.startswith("REINST_"):
+        return "redirector"           # 重定向桩，本就是待清理占位
+    return None
+
+
+def _orphan_confidence(class_name, package, has_primary_id, mtime_age_days, recent_days):
+    """给『无人引用』的资产打可信度。返回 (confidence, reasons[list])。
+    suspect = 可能被静态引用图捕获不到的方式加载（按名/软路径/动态字符串）或刚改动，删除风险高。纯逻辑。"""
+    reasons = []
+    if has_primary_id:
+        reasons.append("primary_asset_id:可能按名加载")
+    if class_name in ("Blueprint", "BlueprintGeneratedClass", "AnimBlueprint"):
+        reasons.append("blueprint:可能按路径实例化")
+    if any(h in package for h in _SCRATCH_HINTS):
+        reasons.append("editor_or_scratch_path")
+    if recent_days is not None and mtime_age_days is not None and mtime_age_days < recent_days:
+        reasons.append("recently_modified")
+    segs = [s for s in package.split("/") if s and s != "Game"]
+    if any(s.startswith("_") for s in segs):
+        reasons.append("underscore_prefixed_dir")
+    return ("suspect" if reasons else "high"), reasons
+
+
+def _assets_under(ar, unreal, folder):
+    """枚举 folder（含递归）下所有 AssetData。多签名兜底；全失败返回 None（调用方报 API_MISMATCH）。"""
+    name = unreal.Name(folder)
+    for call in (
+        lambda: ar.get_assets_by_path(name, True),
+        lambda: ar.get_assets_by_path(name),
+    ):
+        try:
+            out = call()
+        except Exception:
+            continue
+        if out is None:
+            continue
+        try:
+            return list(out)
+        except Exception:
+            continue
+    return None
+
+
+def _has_primary_asset_id(unreal, data):
+    """AssetData 是否有有效 PrimaryAssetId（可能按名加载）。best-effort，取不到判 False。"""
+    try:
+        pid = data.get_primary_asset_id()
+        s = _name_str(pid)
+        return bool(s and s.lower() not in ("none", ""))
+    except Exception:
+        pass
+    try:
+        pai = getattr(data, "primary_asset_id", None)
+        if pai is None:
+            return False
+        name = getattr(pai, "asset_name", None)
+        if name is not None:
+            s = _name_str(name)
+            return bool(s and s.lower() not in ("none", ""))
+    except Exception:
+        pass
+    return False
+
+
+def _cascade_killset(ar, unreal, seed, max_nodes=2000):
+    """级联可回收上限: 从『种子孤儿』做不动点扩散, 找出**仅被这批孤儿引用**的依赖包。
+    删掉种子孤儿后, 这些依赖会变成无人引用的二级孤儿 -> 一并可回收。
+    判定: 候选 X 的全部引用者(含引擎/外部)都已在 killset 内, 才可加入; 只要有一个外部引用者就永久保留。
+    返回 (added_packages:list, truncated:bool)。只在『孤儿子图』上跑 uses+referencers, 规模可控。"""
+    killset = set(seed)
+    frontier = list(seed)
+    added = []
+    seen = set(seed)
+    truncated = False
+    passes = 0
+    while frontier and passes < 50 and not truncated:
+        passes += 1
+        candidates = set()
+        for pkg in frontier:
+            deps, _sig = _registry_graph(ar, unreal, "get_dependencies", pkg, False)
+            for d in deps:
+                if d.startswith("/Game/") and d not in seen:
+                    candidates.add(d)
+        seen |= candidates
+        new_frontier = []
+        for x in sorted(candidates):
+            if len(killset) >= max_nodes:
+                truncated = True
+                break
+            refs, _sig = _registry_graph(ar, unreal, "get_referencers", x, False)
+            if refs and all(r in killset for r in refs):
+                killset.add(x)
+                added.append(x)
+                new_frontier.append(x)
+        frontier = new_frontier
+    return added, truncated
+
+
+@register
+def scan_orphan_assets(folder="/Game", limit=2000, offset=0, max_orphans=200, recent_days=14, cascade=True):
+    """扫描 folder 下的『孤儿资产』：在 AssetRegistry 引用图里没有任何引用者(referencers=0)的 /Game 包。
+    只读。输出可回收体量(total_reclaimable_mb)+按目录聚合+逐条 size/可信度，直接给瘦身清单。
+
+    cascade=True(默认): 追加**级联可回收上限**——把『仅被这批孤儿引用』的依赖(删种子后必成二级孤儿)一并计入,
+      给出 cascading_total_reclaimable_mb(真实可回收上限, >= 种子值)。种子字段(total_reclaimable_mb/orphans)口径不变。
+    工程越大越慢：limit 控制本窗口最多检查多少资产(逐个 get_referencers)，offset 翻页；orphans 再按 size 降序截到 max_orphans。
+    静态引用图无法捕获运行时拼字符串加载(FName/LoadObject by path)——此类资产可能被判 orphan，故有 confidence=suspect 分级，删除前务必二次校验+走版本管理。
+    """
+    import time as _time
+    if isinstance(cascade, str):
+        cascade = cascade.strip().lower() in ("1", "true", "yes")
+    cascade = bool(cascade)
+    folder = (folder or "/Game").strip().strip('"')
+    if not folder.startswith("/Game"):
+        folder = "/Game/" + folder.lstrip("/")
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 2000
+    try:
+        offset = max(0, int(offset))
+    except Exception:
+        offset = 0
+    try:
+        max_orphans = max(1, int(max_orphans))
+    except Exception:
+        max_orphans = 200
+    try:
+        recent_days = int(recent_days)
+    except Exception:
+        recent_days = 14
+
+    result = {
+        "folder": folder, "found_registry": False, "cascade_enabled": cascade,
+        "total_scanned": 0, "total_available": 0,
+        "truncated": False, "cap": limit, "offset": offset,
+        "orphans": [], "orphan_count": 0,
+        "total_reclaimable_bytes": 0, "total_reclaimable_mb": 0.0,
+        "by_dir": {}, "by_dir_truncated": False,
+        "excluded": {}, "confidence_counts": {"high": 0, "suspect": 0},
+        "orphans_truncated": False,
+        "cascading_orphan_count": 0,
+        "cascade_added_count": 0, "cascade_reclaimable_bytes": 0, "cascade_reclaimable_mb": 0.0,
+        "cascading_total_reclaimable_bytes": 0, "cascading_total_reclaimable_mb": 0.0,
+        "cascade_nodes": [], "cascade_nodes_truncated": False, "cascade_truncated": False,
+        "note": ("静态引用图(AssetRegistry，含 soft)；无法捕获运行时拼字符串加载。"
+                 "confidence=suspect 者删除前务必二次校验并先纳入版本管理。"),
+    }
+    try:
+        import unreal
+    except Exception:
+        result["note"] = "no_engine: 需编辑器在线(桥)才能枚举资产与引用图。"
+        return result
+    ar = _registry()
+    if ar is None:
+        return envelope.make_err(envelope.Code.UE_API_MISMATCH,
+                                 "AssetRegistry unavailable: get_asset_registry failed on this engine build")
+    result["found_registry"] = True
+
+    datas = _assets_under(ar, unreal, folder)
+    if datas is None:
+        return envelope.make_err(envelope.Code.UE_API_MISMATCH,
+                                 "get_assets_by_path: no candidate signature matched (5.0-5.8 drift?)")
+
+    entries = []
+    for d in datas:
+        try:
+            pkg = _name_str(d.package_name)
+        except Exception:
+            continue
+        if pkg:
+            entries.append((pkg, d))
+    entries.sort(key=lambda t: t[0])
+    total_all = len(entries)
+    result["total_available"] = total_all
+    window = entries[offset:offset + limit]
+    result["total_scanned"] = len(window)
+    result["truncated"] = (offset + limit) < total_all
+
+    now = _time.time()
+    orphans_all = []
+    excluded_counts = {}
+    conf_counts = {"high": 0, "suspect": 0}
+    by_dir = {}
+
+    for pkg, d in window:
+        cls = _class_name(unreal, d)
+        ex = _orphan_exclusion(cls, pkg)
+        if ex:
+            excluded_counts[ex] = excluded_counts.get(ex, 0) + 1
+            continue
+        refs, sig = _registry_graph(ar, unreal, "get_referencers", pkg, False)
+        if sig is None:
+            return envelope.make_err(envelope.Code.UE_API_MISMATCH,
+                                     "get_referencers: no candidate signature matched (5.0-5.8 drift?)")
+        if len(refs) > 0:
+            continue  # 被任何资产引用 -> 非孤儿
+        has_pid = _has_primary_asset_id(unreal, d)
+        fp, size = _disk_size(unreal, pkg)
+        size = int(size) if size else 0
+        age = None
+        if fp:
+            try:
+                age = (now - os.path.getmtime(fp)) / 86400.0
+            except Exception:
+                age = None
+        conf, reasons = _orphan_confidence(cls, pkg, has_pid, age, recent_days)
+        conf_counts[conf] = conf_counts.get(conf, 0) + 1
+        orphans_all.append({
+            "package": pkg, "class": cls, "size_bytes": size,
+            "size_mb": round(size / 1048576.0, 3), "confidence": conf, "reasons": reasons,
+        })
+        parent = pkg.rpartition("/")[0] or "/"
+        slot = by_dir.setdefault(parent, {"count": 0, "size_bytes": 0})
+        slot["count"] += 1
+        slot["size_bytes"] += size
+
+    total_reclaim = 0
+    for o in orphans_all:
+        total_reclaim += o["size_bytes"]
+    result["orphan_count"] = len(orphans_all)
+    result["total_reclaimable_bytes"] = total_reclaim
+    result["total_reclaimable_mb"] = round(total_reclaim / 1048576.0, 3)
+    result["excluded"] = excluded_counts
+    result["confidence_counts"] = conf_counts
+
+    dirs_sorted = sorted(by_dir.items(), key=lambda kv: kv[1]["size_bytes"], reverse=True)
+    result["by_dir"] = {k: {"count": v["count"], "size_bytes": v["size_bytes"],
+                            "size_mb": round(v["size_bytes"] / 1048576.0, 3)}
+                        for k, v in dirs_sorted[:30]}
+    result["by_dir_truncated"] = len(dirs_sorted) > 30
+
+    orphans_all.sort(key=lambda o: o["size_bytes"], reverse=True)
+    result["orphans"] = orphans_all[:max_orphans]
+    result["orphans_truncated"] = len(orphans_all) > max_orphans
+
+    # 级联可回收上限: 从种子孤儿扩散
+    seed_pkgs = [o["package"] for o in orphans_all]
+    casc_bytes = 0
+    cascade_nodes = []
+    if cascade and seed_pkgs:
+        added, casc_trunc = _cascade_killset(ar, unreal, seed_pkgs, max_nodes=5000)
+        result["cascade_truncated"] = casc_trunc
+        for pkg in added:
+            leaf = pkg.rpartition("/")[2]
+            cls = None
+            try:
+                dd = _asset_data(ar, unreal, pkg, pkg + "." + leaf) if leaf else None
+                if dd is not None:
+                    cls = _class_name(unreal, dd)
+            except Exception:
+                cls = None
+            if _orphan_exclusion(cls, pkg):  # 关卡/外部 actor/重定向桩不参与级联删除
+                continue
+            _fp, sz = _disk_size(unreal, pkg)
+            sz = int(sz) if sz else 0
+            casc_bytes += sz
+            cascade_nodes.append({"package": pkg, "class": cls,
+                                  "size_bytes": sz, "size_mb": round(sz / 1048576.0, 3)})
+        cascade_nodes.sort(key=lambda o: o["size_bytes"], reverse=True)
+    result["cascade_added_count"] = len(cascade_nodes)
+    result["cascade_reclaimable_bytes"] = casc_bytes
+    result["cascade_reclaimable_mb"] = round(casc_bytes / 1048576.0, 3)
+    result["cascading_orphan_count"] = len(orphans_all) + len(cascade_nodes)
+    casc_total = total_reclaim + casc_bytes
+    result["cascading_total_reclaimable_bytes"] = casc_total
+    result["cascading_total_reclaimable_mb"] = round(casc_total / 1048576.0, 3)
+    result["cascade_nodes"] = cascade_nodes[:max_orphans]
+    result["cascade_nodes_truncated"] = len(cascade_nodes) > max_orphans
+
+    if result["truncated"]:
+        result["scan_note"] = "本次仅扫描 offset=%d 起 %d 个资产(共 %d)；reclaimable 为该窗口内值，翻页可累计。" % (offset, result["total_scanned"], total_all)
+    return result
