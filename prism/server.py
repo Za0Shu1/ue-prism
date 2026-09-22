@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import traceback
 
 from . import attributelog, bus, envelope, folderscan, logscan, registry, rules, tasks, uat
@@ -146,6 +147,17 @@ def get_asset_chain(asset_path, direction="uses", scope="game", with_meta=True, 
          "max_nodes": max_nodes, "max_depth": max_depth})
 
 
+def _as_path_list(value):
+    """Normalize asset_paths: list/tuple as-is, or a string split on , / ; / newline."""
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        seq = list(value)
+    else:
+        seq = re.split(r"[,\n;]+", str(value))
+    return [t for t in (str(x).strip() for x in seq) if t]
+
+
 def get_asset_metrics(asset_paths, max_assets=20, project=None):
     """Batch raw asset metrics via bridge (texture px / mesh LOD triangles), with tried/api evidence.
 
@@ -155,7 +167,7 @@ def get_asset_metrics(asset_paths, max_assets=20, project=None):
     if err:
         return err
     return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call(
-        "get_asset_metrics", {"asset_paths": list(asset_paths or []), "max_assets": int(max_assets)})
+        "get_asset_metrics", {"asset_paths": _as_path_list(asset_paths), "max_assets": int(max_assets)})
 
 
 # ---------------- 离线工具（读磁盘） ----------------
