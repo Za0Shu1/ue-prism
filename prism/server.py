@@ -113,7 +113,7 @@ def _resolve_offline_dir(project_dir=None, project=None):
 
 # ---------------- 桥工具（编辑器在线） ----------------
 
-def ping(project=None):
+def ping(project: str | None = None):
     """Ping the in-editor bridge: heartbeat, UE version, project dir, loaded maps."""
     bus_dir, _pd, err = _resolve(project)
     if err:
@@ -121,7 +121,7 @@ def ping(project=None):
     return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call("ping", {})
 
 
-def list_level_actors(class_contains=None, tag=None, limit=200, project=None):
+def list_level_actors(class_contains: str | None = None, tag: str | None = None, limit: int = 200, project: str | None = None):
     """List actors in the loaded level (name/class/label/path/location/components). Needs the live bridge."""
     bus_dir, _pd, err = _resolve(project)
     if err:
@@ -132,7 +132,7 @@ def list_level_actors(class_contains=None, tag=None, limit=200, project=None):
     )
 
 
-def describe_asset(asset_path, project=None):
+def describe_asset(asset_path: str, project: str | None = None):
     """Read one asset's registry metadata (class/package/on-disk size). Needs the live bridge."""
     bus_dir, _pd, err = _resolve(project)
     if err:
@@ -141,7 +141,7 @@ def describe_asset(asset_path, project=None):
         "describe_asset", {"asset_path": asset_path})
 
 
-def get_asset_references(asset_path, direction="both", recursive=False, limit=500, project=None):
+def get_asset_references(asset_path: str, direction: str = "both", recursive: bool = False, limit: int = 500, project: str | None = None):
     """Reference graph via AssetRegistry: uses(依赖)/used_by(被引用). direction in both|uses|used_by. Needs live bridge."""
     bus_dir, _pd, err = _resolve(project)
     if err:
@@ -152,7 +152,7 @@ def get_asset_references(asset_path, direction="both", recursive=False, limit=50
     )
 
 
-def get_asset_chain(asset_path, direction="uses", scope="game", with_meta=True, max_nodes=2000, max_depth=0, project=None):
+def get_asset_chain(asset_path: str, direction: str = "uses", scope: str = "game", with_meta: bool = True, max_nodes: int = 2000, max_depth: int = 0, project: str | None = None):
     """递归依赖闭包（迁移预览）：uses=该资产依赖的整条链(迁移要带走)；used_by=谁依赖它(连累面)。
     scope=game(默认)只留 /Game；with_meta 给每节点补 class+size_bytes 并按类别聚合体量。Needs live bridge."""
     bus_dir, _pd, err = _resolve(project)
@@ -175,7 +175,7 @@ def _as_path_list(value):
     return [t for t in (str(x).strip() for x in seq) if t]
 
 
-def get_asset_metrics(asset_paths, max_assets=20, project=None):
+def get_asset_metrics(asset_paths: str, max_assets: int = 20, project: str | None = None):
     """Batch raw asset metrics via bridge (texture px / mesh LOD triangles), with tried/api evidence.
 
     Loads assets into editor memory as a side effect - keep max_assets small. Needs live bridge.
@@ -187,7 +187,7 @@ def get_asset_metrics(asset_paths, max_assets=20, project=None):
         "get_asset_metrics", {"asset_paths": _as_path_list(asset_paths), "max_assets": int(max_assets)})
 
 
-def scan_orphan_assets(folder="/Game", limit=2000, offset=0, max_orphans=200, recent_days=14, cascade=True, project=None):
+def scan_orphan_assets(folder: str = "/Game", limit: int = 2000, offset: int = 0, max_orphans: int = 200, recent_days: int = 14, cascade: bool = True, project: str | None = None):
     """扫描 /Game 孤儿资产（引用图里无任何引用者）：给可回收体量 + 按目录聚合 + 逐条 size/可信度。只读。Needs live bridge.
 
     工程越大越慢：limit 控制本窗口最多检查多少资产，offset 翻页；orphans 按 size 降序截到 max_orphans。
@@ -204,7 +204,7 @@ def scan_orphan_assets(folder="/Game", limit=2000, offset=0, max_orphans=200, re
 
 # ---------------- 离线工具（读磁盘） ----------------
 
-def read_editor_log(level="Error", tail=2000, top=30, project_dir=None, project=None):
+def read_editor_log(level: str = "Error", tail: int = 2000, top: int = 30, project_dir: str | None = None, project: str | None = None):
     """Aggregate editor log lines by message (category/count/first_seen/sample). Offline; no bridge needed."""
     pd, err = _resolve_offline_dir(project_dir, project)
     if err:
@@ -217,7 +217,7 @@ def read_editor_log(level="Error", tail=2000, top=30, project_dir=None, project=
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e), traceback.format_exc())
 
 
-def scan_folder_assets(folder="/Game", sort="size", limit=500, project_dir=None, project=None):
+def scan_folder_assets(folder: str = "/Game", sort: str = "size", limit: int = 500, project_dir: str | None = None, project: str | None = None):
     """Audit on-disk assets under <project>/Content: sorted by size + per-type totals. Offline; no bridge."""
     pd, err = _resolve_offline_dir(project_dir, project)
     if err:
@@ -232,8 +232,8 @@ def scan_folder_assets(folder="/Game", sort="size", limit=500, project_dir=None,
 
 # ---------------- cook / package（写操作，双钥确认） ----------------
 
-def cook_package(platform="Windows", mode="cook", configuration="Development", map=None,
-                 output_dir=None, iterate=None, dry_run=True, confirm=False, project=None):
+def cook_package(platform: str = "Windows", mode: str = "cook", configuration: str = "Development", map: str | None = None,
+                 output_dir: str | None = None, iterate: bool | None = None, dry_run: bool = True, confirm: bool = False, project: str | None = None):
     """Trigger UE cook/package via UAT on the server side (first iteration Windows-only).
 
     mode: cook | package. DEFAULT dry_run: only returns assembled command + env checks.
@@ -281,7 +281,7 @@ def cook_package(platform="Windows", mode="cook", configuration="Development", m
     return uat.submit(bus_dir, pd, platform, mode, configuration, map, output_dir, bool(iterate))
 
 
-def get_cook_status(task_id, tail=20, project=None):
+def get_cook_status(task_id: str, tail: int = 20, project: str | None = None):
     """Lazy-derived status of a cook/package task: {status, exit_code?, log, log_tail}.
 
     Status is recomputed from on-disk facts at read time (done marker / deadline /
@@ -302,7 +302,7 @@ def get_cook_status(task_id, tail=20, project=None):
     return envelope.make_ok(v)
 
 
-def attribute_cook_errors(task_id=None, log_path=None, top=30, project=None):
+def attribute_cook_errors(task_id: str | None = None, log_path: str | None = None, top: int = 30, project: str | None = None):
     """Group cook/editor log Error lines by fingerprint and attribute them to /Game assets.
 
     Provide task_id (from cook_package) or an explicit log_path. Offline-safe; when the
@@ -335,7 +335,7 @@ def attribute_cook_errors(task_id=None, log_path=None, top=30, project=None):
 
 # ---------------- 性能规则 ----------------
 
-def get_perf_report(scope="/Game", target=None, project=None, recent_tasks=rules.DEFAULT_RECENT_TASKS):
+def get_perf_report(scope: str = "/Game", target: str | None = None, project: str | None = None, recent_tasks: int = rules.DEFAULT_RECENT_TASKS):
     """Static performance audit from the offline rule pack (v0.3 PR-A).
 
     Reads disk + cook task archives only; findings carry rule_id/severity/subject/
@@ -363,7 +363,7 @@ def get_perf_report(scope="/Game", target=None, project=None, recent_tasks=rules
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e), traceback.format_exc())
 
 
-def list_perf_rules(target=None, project=None):
+def list_perf_rules(target: str | None = None, project: str | None = None):
     """List active rule pack (id/channel/thresholds/doc) for report explainability."""
     _b, pd, _err = _resolve(project, allow_stale=True)
     try:
@@ -449,7 +449,7 @@ def _build_plan(client, ap, new_name, dest_path, include_impact=True, impact_lim
     }
     return plan, None
 
-def preview_asset_migration(asset_path, new_name=None, dest_path=None, project=None, impact_limit=200):
+def preview_asset_migration(asset_path: str, new_name: str | None = None, dest_path: str | None = None, project: str | None = None, impact_limit: int = 200):
     """Dry-run 迁移预览（纯只读）：解析目标路径 + 冲突检测 + used_by 影响面，绝不改动任何东西。
 
     给 new_name -> 计划改名；给 dest_path -> 计划移动到该目录（可与 new_name 同时）。
@@ -522,19 +522,19 @@ def _migrate(op, asset_path, new_name, dest_path, dry_run, confirm, project, fix
     return client.call("migrate_asset_move", {"asset_path": ap, "dest_path": dp, "new_name": nn, "confirm": True, "fixup_redirectors": fixup_redirectors})
 
 
-def migrate_asset_rename(asset_path, new_name, dry_run=True, confirm=False, project=None, fixup_redirectors=True):
+def migrate_asset_rename(asset_path: str, new_name: str, dry_run: bool = True, confirm: bool = False, project: str | None = None, fixup_redirectors: bool = True):
     """真改名（写操作 · 双钥）。默认 dry_run 只回计划；dry_run=False 且 confirm=True 才落盘。
     UE 自动修引用（内存态，需保存）；成功后默认清一次重定向桩(fixup_redirectors)，可用 False 关闭。"""
     return _migrate("rename", asset_path, new_name, None, dry_run, confirm, project, fixup_redirectors)
 
 
-def migrate_asset_move(asset_path, dest_path, new_name=None, dry_run=True, confirm=False, project=None, fixup_redirectors=True):
+def migrate_asset_move(asset_path: str, dest_path: str, new_name: str | None = None, dry_run: bool = True, confirm: bool = False, project: str | None = None, fixup_redirectors: bool = True):
     """真移动（写操作 · 双钥）。默认 dry_run 只回计划；双钥满足才落盘。可带 new_name 同时改名。
     成功后默认清一次重定向桩(fixup_redirectors)，可用 False 关闭。"""
     return _migrate("move", asset_path, new_name, dest_path, dry_run, confirm, project, fixup_redirectors)
 
 
-def migrate_asset(asset_path, dest_path, new_name=None, dry_run=True, confirm=False, project=None):
+def migrate_asset(asset_path: str, dest_path: str, new_name: str | None = None, dry_run: bool = True, confirm: bool = False, project: str | None = None):
     """迁移(A·同工程复制)：资产+其 /Game uses 闭包按镜像结构复制到 dest 目录。默认 dry_run 只回复制计划；
     双钥(dry_run=False+confirm=True)才落盘。原件不动。Needs live bridge."""
     bus_dir, _pd, err = _resolve(project)
