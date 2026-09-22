@@ -11,6 +11,7 @@ bridge 通道规则经总线批量取数（describe_many/get_asset_metrics/list_
 from __future__ import annotations
 
 import copy
+import glob
 import os
 import re
 try:  # tomllib 仅 3.11+；3.10 用等价的 tomli（见 pyproject 条件依赖）
@@ -265,6 +266,16 @@ def _rule_scene_light_dup(ctx):
              "advice": "duplicate directional/skylights cost double lighting passes; keep one of each"}]
 
 
+def _map_cooked_on_disk(project_dir, map_key):
+    """增量 cook 全保留(no-op)时日志不会有任何该 map 的逐包行——用磁盘 cook 产物做第二证据源。
+
+    Saved/Cooked/<平台>/<工程>/Content/<地图>.umap 存在 = 曾被成功 cook（本会话只是没重煮它）。
+    """
+    stem = map_key.rpartition("/")[2]
+    pat = os.path.join(str(project_dir), "Saved", "Cooked", "*", "*", "Content", stem + ".umap")
+    return bool(glob.glob(pat))
+
+
 def _rule_cook_empty_maps(ctx):
     """校准发现②规则化：+maps 里的地图名从未被 cook（静默忽略），或整轮 0 包。"""
     out = []
@@ -288,14 +299,18 @@ def _rule_cook_empty_maps(ctx):
         for mp in _MAPS_RE.findall(rec.get("command") or ""):
             key = mp if mp.startswith("/Game/") else "/Game/" + mp
             cooked = key in blob
+            if not cooked and _map_cooked_on_disk(ctx["project_dir"], key):
+                cooked = True  # 增量保留 no-op：日志无逐包证据，但磁盘产物证明煮过（如 -iterate 全 up-to-date）
             if not cooked and key not in reported_maps:
                 reported_maps.add(key)
                 out.append({"rule_id": "cook_empty_maps", "severity": "error", "subject": key,
                             "evidence": {"task_id": rec["task_id"], "requested_map": mp,
                                          "check": "map_not_cooked",
+                                         "disk_check": "cooked_artifact_absent",
                                          "task_created_ts": rec.get("created_ts")},
                             "threshold": None,
-                            "advice": "requested map never cooked (UE silently ignores bad +maps) - verify name via ping loaded_maps"})
+                            "advice": "requested map never cooked (no log evidence and no cooked .umap on disk; "
+                                      "UE silently ignores bad +maps) - verify name via ping loaded_maps"})
         if totals and int(totals[-1]) == 0:
             out.append({"rule_id": "cook_empty_maps", "severity": "warn", "subject": rec["task_id"],
                         "evidence": {"cooked_total": 0, "check": "zero_package_cook",
