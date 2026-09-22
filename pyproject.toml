@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ue-prism"
+version = "1.2.0"
+description = "面向 Unreal Engine 项目的 MCP 诊断服务器（日志 / 性能 / 引用，结构化只读）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Za0Shu1" }]
+dependencies = [
+  "mcp>=2,<3",
+  "tomli>=1.1.0; python_version < '3.11'",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Software Development :: Testing",
+  "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/Za0Shu1/ue-prism"
+Repository = "https://github.com/Za0Shu1/ue-prism"
+Issues = "https://github.com/Za0Shu1/ue-prism/issues"
+Documentation = "https://github.com/Za0Shu1/ue-prism/blob/main/docs/SETUP.md"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+ue-prism = "prism.server:main"
+prism = "prism.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["prism*"]

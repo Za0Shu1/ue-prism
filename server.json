@@ -1,0 +1,25 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/registry.schema.json",
+  "name": "io.github.Za0Shu1/ue-prism",
+  "title": "ue-prism",
+  "description": "MCP server for Unreal Engine projects: read-only diagnostics (logs / performance / asset references) plus a guarded asset-migration suite. Connects to a running editor over a local file bus with zero project-path configuration.",
+  "websiteUrl": "https://github.com/Za0Shu1/ue-prism",
+  "repositoryUrl": "https://github.com/Za0Shu1/ue-prism",
+  "license": "MIT",
+  "version": "1.2.0",
+  "servers": {
+    "ue-prism": {
+      "description": "Connect the agent to a running Unreal Engine editor (auto-discovers active projects via the local registry).",
+      "transport": {
+        "type": "stdio"
+      },
+      "source": {
+        "source_type": "pypi",
+        "name": "ue-prism",
+        "version": "1.2.0",
+        "module_path": "prism.server",
+        "registry_base_url": "https://pypi.org/simple/"
+      }
+    }
+  }
+}

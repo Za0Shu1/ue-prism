@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.tox/
+*.tmp
+# 文件总线运行目录（一般落在工程 Saved/Prism，不入库）
+cmd_*.json
+res_*.json
+
+# 对内工程笔记（独立私有库 / 本地留存，不随公开仓库提交）
+_internal/

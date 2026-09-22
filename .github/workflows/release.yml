@@ -1,0 +1,39 @@
+name: Release (GitHub)
+
+# 打 tag（v*）触发：build sdist + wheel，并挂到一个 GitHub Release。
+# 用内置 GITHUB_TOKEN，不需要任何 PyPI 账号。这是"只有 GitHub"时的分发渠道。
+# 用户安装：
+#   直接仓库： pip install git+https://github.com/Za0Shu1/ue-prism.git
+#   或下载本 Release 里的 .whl： pip install <release 资产直链>.whl
+# 配好 MCP 后跑： prism setup --client codex
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build + attach to GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gh-release-dist
+          path: dist/
+      - name: Create GitHub Release with assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

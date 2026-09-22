@@ -1,0 +1,46 @@
+name: Publish to PyPI
+
+# 仅打 tag（v*）触发；build 与 publish 分两 job，publish 用 OIDC Trusted Publishing（无 token）。
+# 一次性前置：在 PyPI 把本项目配成 trusted publisher，指向本仓库 + 本文件的 publish job。
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    # 默认跳过：尚未注册 PyPI 账号 / 配 Trusted Publishing 时，打 tag 不让此 job 红叉。
+    # 上线 PyPI 时：在仓库 Settings → Secrets and variables → Actions → Variables 新建
+    #   Repository variable  PYPI_PUBLISH = true
+    #   （并先在 pypi.org 配好指向本仓库 publish job 的 trusted publisher）
+    name: Publish to PyPI (Trusted Publishing)
+    needs: build
+    if: vars.PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/ue-prism/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
