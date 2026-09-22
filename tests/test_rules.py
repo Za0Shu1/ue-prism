@@ -83,11 +83,23 @@ def test_cook_drop_only_for_succeeded(tmp_path):
     assert "task_id" in drops[0]["evidence"]
 
 
-def test_missing_content_skips_rule_not_crash(tmp_path):
-    proj = _proj(tmp_path, content=False)
-    rep = rules.run_report(proj, _bus(tmp_path))
-    assert any("asset_size_top" in s for s in rep["summary"]["skipped_rules"])
-    assert rep["ok" if False else "total"] == 0
+def test_missing_content_or_bad_scope_errors(tmp_path):
+    """契约更新：Content 缺失 / scope 目录不存在 / 窗口参数非法 -> 显式 ValueError（server 层转
+    RUNTIME_ERROR），不再静默跳过规则产出伪装成功的残缺报告。"""
+    b = _bus(tmp_path)
+    with pytest.raises(ValueError):
+        rules.run_report(_proj(tmp_path, content=False), b)
+    # 换一个独立工程目录再测 scope 校验（_proj 固定路径，不可同 tmp_path 连建两次）
+    proj = str(tmp_path / "Proj2")
+    os.makedirs(os.path.join(proj, "Content", "Bad"))
+    open(os.path.join(proj, "Content", "Bad", "Big.uasset"), "wb").write(b"y" * 3000)
+    open(os.path.join(proj, "prism.toml"), "w").write(TOML)
+    with pytest.raises(ValueError):
+        rules.run_report(proj, b, scope="project")                # 当年把 scope 当字面子目录的误用
+    rep = rules.run_report(proj, b, scope="Bad")                  # 现有文件夹（可省 /Game 前缀）照常出报告
+    assert rep["summary"]["error"] == 1 and rep["findings"][0]["subject"] == "/Game/Bad/Big"
+    with pytest.raises(ValueError):
+        rules.run_report(proj, b, recent_tasks="many")            # 窗口参数也要报错而非吞掉
 
 
 def test_server_tool_wiring(tmp_path):
@@ -256,3 +268,53 @@ def test_tomllib_falls_back_to_tomli_on_py310():
     # loads 收 str（tomllib/tomli 一致）；能解析即用
     data = rules.tomllib.loads("[profile]\ntarget = \"pc\"\n")
     assert data["profile"]["target"] == "pc"
+
+
+# ---------- 档案窗口：陈旧 cook 证据自动过期 ----------
+
+def test_stale_cook_findings_expire_out_of_window(tmp_path):
+    """drop 只出现在最老的成功档案里：默认窗口(3)被更新的干净 cook 取代后不再报警；0=全部可取证。"""
+    proj = _proj(tmp_path)
+    b = _bus(tmp_path)
+    old = _drop_task(b, proj)
+    for _ in range(3):
+        _task_with_log(b, proj, 'UAT BuildCookRun +maps="/Game/NewMap"', COOKED_OK)
+    rep = rules.run_report(proj, b)
+    assert [f for f in rep["findings"] if f["rule_id"] == "cook_drop"] == []
+    assert rep["cook_archive"]["archive_total"] == 4
+    assert rep["cook_archive"]["window_task_ids"][0] != old["task_id"]
+    assert old["task_id"] not in rep["cook_archive"]["window_task_ids"]
+    rep_all = rules.run_report(proj, b, recent_tasks=0)
+    drops = [f for f in rep_all["findings"] if f["rule_id"] == "cook_drop"]
+    assert len(drops) == 1 and drops[0]["evidence"]["task_id"] == old["task_id"]
+
+
+def test_cook_drop_dedup_keeps_newest(tmp_path):
+    """同一资产在窗口内多份档案重复 drop：只归因最新一份，并携带 task_created_ts。"""
+    proj = _proj(tmp_path)
+    b = _bus(tmp_path)
+    _drop_task(b, proj)
+    _task_with_log(b, proj, 'UAT BuildCookRun +maps="/Game/NewMap"', COOKED_OK)
+    new = _drop_task(b, proj)
+    rep = rules.run_report(proj, b)
+    hits = [f for f in rep["findings"] if f["rule_id"] == "cook_drop"]
+    assert len(hits) == 1
+    assert hits[0]["evidence"]["task_id"] == new["task_id"]
+    assert hits[0]["evidence"]["task_created_ts"] == new["created_ts"]
+
+
+def test_server_perf_report_scope_and_window(tmp_path):
+    """server 层契约：坏 scope -> ok:false 的 RUNTIME_ERROR；窗口元数据随报告返回。"""
+    proj = _proj(tmp_path)
+    b = _bus(tmp_path)
+    server._CFG["project_dir"] = proj
+    server._CFG["bus_dir"] = b
+    try:
+        bad = server.get_perf_report(scope="project")
+        assert bad["ok"] is False and bad["error"]["code"] == envelope.Code.RUNTIME_ERROR
+        assert "scope" in bad["error"]["message"]
+        ok = server.get_perf_report(recent_tasks="1")   # MCP 字符串送达也要可用
+        assert ok["ok"] and ok["result"]["cook_archive"]["recent_tasks"] == 1
+    finally:
+        server._CFG["project_dir"] = None
+        server._CFG["bus_dir"] = None

@@ -38,6 +38,7 @@ PROFILES = {
                "scene_light_dup": {"max_dup": 1}},
 }
 DEFAULT_CAP = 50
+DEFAULT_RECENT_TASKS = 3
 METRIC_CLASSES = {"Texture2D", "TextureCube", "VirtualTexture2D", "StaticMesh"}
 
 # 真机校准发现：cook succeeded 但依赖缺失仅报 Warning 并静默丢弃（DESIGN_v0.2 PR-4 ③）
@@ -124,6 +125,19 @@ def _ensure_actors(ctx):
     return ctx["actors"]
 
 
+def _cook_records(ctx):
+    """cook/package 档案窗口：滤 kind -> created_ts 倒序 -> 取最近 recent_tasks 个（0/None=全部档案）。"""
+    if "cook_recs" not in ctx:
+        recs = [r for r in tasks.list_records(ctx["bus_dir"])
+                if r.get("kind") in ("cook", "package")
+                and tasks.derive_state(ctx["bus_dir"], r)[0] == tasks.STATUS_SUCCEEDED]
+        recs.sort(key=lambda r: r.get("created_ts") or 0, reverse=True)
+        k = ctx.get("recent_tasks") or 0
+        ctx["cook_recs"] = recs[:k] if k > 0 else recs
+        ctx["cook_recs_total"] = len(recs)
+    return ctx["cook_recs"]
+
+
 def _rule_asset_size_top(ctx):
     th = ctx["profile"]["asset_size_mb"]
     out = []
@@ -143,9 +157,8 @@ def _rule_asset_size_top(ctx):
 
 def _rule_cook_drop(ctx):
     out = []
-    for rec in tasks.list_records(ctx["bus_dir"]):
-        if rec.get("kind") not in ("cook", "package"):
-            continue
+    reported = set()  # 窗口新→旧遍历：同一 subject 只归最新档案，更新的成功 cook 会让陈旧证据自动过期
+    for rec in _cook_records(ctx):
         status, _ = tasks.derive_state(ctx["bus_dir"], rec)
         if status != tasks.STATUS_SUCCEEDED:
             continue
@@ -163,13 +176,15 @@ def _rule_cook_drop(ctx):
             if any(mk in raw for mk in DROP_MARKERS):
                 found = [m.split(".", 1)[0] for m in attributelog.GAME_RE.findall(raw)]
                 key = found[0] if found else rec["task_id"]
-                if key in seen:
+                if key in seen or key in reported:
                     continue
                 seen.add(key)
+                reported.add(key)
                 hits += 1
                 out.append({"rule_id": "cook_drop", "severity": "error",
                             "subject": found[0] if found else rec["task_id"],
                             "evidence": {"task_id": rec["task_id"], "line_no": i + 1,
+                                         "task_created_ts": rec.get("created_ts"),
                                          "excerpt": raw.strip()[:200]},
                             "threshold": None,
                             "advice": "cook succeeded but content was dropped; restore/fix the missing dependency"})
@@ -253,9 +268,8 @@ def _rule_scene_light_dup(ctx):
 def _rule_cook_empty_maps(ctx):
     """校准发现②规则化：+maps 里的地图名从未被 cook（静默忽略），或整轮 0 包。"""
     out = []
-    for rec in tasks.list_records(ctx["bus_dir"]):
-        if rec.get("kind") not in ("cook", "package"):
-            continue
+    reported_maps = set()
+    for rec in _cook_records(ctx):
         status, _ = tasks.derive_state(ctx["bus_dir"], rec)
         if status != tasks.STATUS_SUCCEEDED:
             continue
@@ -274,15 +288,18 @@ def _rule_cook_empty_maps(ctx):
         for mp in _MAPS_RE.findall(rec.get("command") or ""):
             key = mp if mp.startswith("/Game/") else "/Game/" + mp
             cooked = key in blob
-            if not cooked:
+            if not cooked and key not in reported_maps:
+                reported_maps.add(key)
                 out.append({"rule_id": "cook_empty_maps", "severity": "error", "subject": key,
                             "evidence": {"task_id": rec["task_id"], "requested_map": mp,
-                                         "check": "map_not_cooked"},
+                                         "check": "map_not_cooked",
+                                         "task_created_ts": rec.get("created_ts")},
                             "threshold": None,
                             "advice": "requested map never cooked (UE silently ignores bad +maps) - verify name via ping loaded_maps"})
         if totals and int(totals[-1]) == 0:
             out.append({"rule_id": "cook_empty_maps", "severity": "warn", "subject": rec["task_id"],
-                        "evidence": {"cooked_total": 0, "check": "zero_package_cook"},
+                        "evidence": {"cooked_total": 0, "check": "zero_package_cook",
+                                     "task_created_ts": rec.get("created_ts")},
                         "threshold": None,
                         "advice": "cook reported success with 0 cooked packages - likely stale no-op; rerun with iterate=False"})
     return out
@@ -299,9 +316,20 @@ RULES = (
 )
 
 
-def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP):
+def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP,
+               recent_tasks=DEFAULT_RECENT_TASKS):
     profile, used_target = load_profile(project_dir, target)
-    ctx = {"project_dir": project_dir, "bus_dir": bus_dir, "scope": scope, "profile": profile}
+    # scope 必须映射到 Content 下真实存在的目录：无效 scope 直接报错，拒绝静默跳规则出"看似干净"的残缺报告
+    scope = str(scope or "/Game").strip() or "/Game"
+    scope_root = folderscan._disk_root(project_dir, scope)
+    if not os.path.isdir(scope_root):
+        raise ValueError("scope 不存在: %r -> %s（应为 /Game 下现有文件夹，可省略 /Game 前缀）" % (scope, scope_root))
+    try:
+        recent_tasks = int(recent_tasks)
+    except (TypeError, ValueError):
+        raise ValueError("recent_tasks 需为整数（0=扫描全部历史档案），got %r" % (recent_tasks,))
+    ctx = {"project_dir": project_dir, "bus_dir": bus_dir, "scope": scope, "profile": profile,
+           "recent_tasks": recent_tasks}
     findings, skipped = [], []
     try:
         bridge_online = _bridge_status(bus_dir)
@@ -318,6 +346,7 @@ def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP
             skipped.append("%s: %s" % (rule["id"], e))
         except Exception as e:
             skipped.append("%s: %s" % (rule["id"], str(e)[:120]))
+    window_ids = [r["task_id"] for r in _cook_records(ctx)]
     rank = {"error": 0, "warn": 1}
     findings.sort(key=lambda x: (rank.get(x["severity"], 9), x["rule_id"], x["subject"]))  # 稳定序：diff 友好
     total = len(findings)
@@ -332,6 +361,9 @@ def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP
         "note": "bridge rules measure top-80 largest assets (sampled, not exhaustive)" if bridge_online
         else "offline half-report (bridge rules skipped)",
         "summary": summary,
+        "cook_archive": {"recent_tasks": recent_tasks,
+                         "window_task_ids": window_ids,
+                         "archive_total": ctx.get("cook_recs_total", len(window_ids))},
         "findings": findings[:cap],
         "total": total,
         "truncated": total > cap,
