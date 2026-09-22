@@ -23,6 +23,23 @@ from . import attributelog, bus, envelope, folderscan, logscan, registry, rules,
 _CFG = {"bus_dir": None, "project_dir": None}
 
 
+def _as_bool(v, default=False):
+    """MCP 通道把 bool 参数以字符串送达："False"/"0" 等恒为真值——双钥契约的 truthy 陷阱。
+
+    显式归一化：true/1/yes/on -> True；false/0/no/off/空 -> False；None -> default；其余报错。
+    """
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return default
+    t = str(v).strip().lower()
+    if t in ("1", "true", "yes", "y", "on"):
+        return True
+    if t in ("", "0", "false", "no", "n", "off"):
+        return False
+    raise ValueError("无法解析布尔值: %r（可用 true/false/1/0/yes/no）" % (v,))
+
+
 # ---------------- 连接解析：判定阶梯（DESIGN_v1.0 §3.3） ----------------
 
 def _has_explicit():
@@ -235,6 +252,12 @@ def cook_package(platform="Windows", mode="cook", configuration="Development", m
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, "no project_dir (pass project= / --project-dir)")
     if mode not in ("cook", "package"):
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, "mode must be cook|package, got %r" % (mode,))
+    try:
+        dry_run = _as_bool(dry_run, default=True)
+        confirm = _as_bool(confirm, default=False)
+        iterate = None if iterate is None else _as_bool(iterate)
+    except ValueError as e:
+        return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e))
     if iterate is None:
         iterate = (mode == "cook")  # cook 默认增量；package 默认全量（设计稿 §4 注记）
     checks, uerr = uat.check_environment(pd, platform)
@@ -312,12 +335,17 @@ def attribute_cook_errors(task_id=None, log_path=None, top=30, project=None):
 
 # ---------------- 性能规则 ----------------
 
-def get_perf_report(scope="/Game", target=None, project=None):
+def get_perf_report(scope="/Game", target=None, project=None, recent_tasks=rules.DEFAULT_RECENT_TASKS):
     """Static performance audit from the offline rule pack (v0.3 PR-A).
 
     Reads disk + cook task archives only; findings carry rule_id/severity/subject/
     evidence/threshold/advice, sorted error>warn, capped by total/truncated/cap.
     Bridge-channel rules join when the editor is live; offline yields a half report.
+
+    scope 必须是 Content 下真实存在的文件夹（/Game 前缀可省略）；无效值直接返回 RUNTIME_ERROR，
+    不再静默跳过规则产出"看似干净"的残缺报告。cook 类规则只审计最近 recent_tasks 个成功的
+    cook/package 档案（默认 3；0=全部历史档案，供取证），陈旧证据随更新任务自动过期，
+    窗口明细见返回的 cook_archive 字段。
     """
     bus_dir, pd, err = _resolve(project, allow_stale=True)
     if err:
@@ -327,7 +355,8 @@ def get_perf_report(scope="/Game", target=None, project=None):
     if not bus_dir:
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, "no bus_dir for cook archives")
     try:
-        return envelope.make_ok(rules.run_report(pd, bus_dir, scope=scope, target=target))
+        return envelope.make_ok(rules.run_report(pd, bus_dir, scope=scope, target=target,
+                                                 recent_tasks=recent_tasks))
     except ValueError as e:
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e))
     except Exception as e:
@@ -455,6 +484,12 @@ def _migrate(op, asset_path, new_name, dest_path, dry_run, confirm, project, fix
     bus_dir, _pd, err = _resolve(project)
     if err:
         return err
+    try:
+        dry_run = _as_bool(dry_run, default=True)
+        confirm = _as_bool(confirm, default=False)
+        fixup_redirectors = _as_bool(fixup_redirectors, default=True)
+    except ValueError as e:
+        return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e))
     ap = str(asset_path or "").strip()
     if not ap.startswith("/Game"):
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, "asset_path 需是 /Game 包路径")
@@ -505,6 +540,11 @@ def migrate_asset(asset_path, dest_path, new_name=None, dry_run=True, confirm=Fa
     bus_dir, _pd, err = _resolve(project)
     if err:
         return err
+    try:
+        dry_run = _as_bool(dry_run, default=True)
+        confirm = _as_bool(confirm, default=False)
+    except ValueError as e:
+        return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e))
     return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call(
         "migrate_asset",
         {"asset_path": asset_path, "dest_path": dest_path, "new_name": new_name, "dry_run": dry_run, "confirm": confirm})
