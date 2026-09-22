@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import traceback
 
 from . import attributelog, bus, envelope, folderscan, logscan, registry, rules, tasks, uat
@@ -146,6 +147,17 @@ def get_asset_chain(asset_path, direction="uses", scope="game", with_meta=True, 
          "max_nodes": max_nodes, "max_depth": max_depth})
 
 
+def _as_path_list(value):
+    """Normalize asset_paths: list/tuple as-is, or a string split on , / ; / newline."""
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        seq = list(value)
+    else:
+        seq = re.split(r"[,\n;]+", str(value))
+    return [t for t in (str(x).strip() for x in seq) if t]
+
+
 def get_asset_metrics(asset_paths, max_assets=20, project=None):
     """Batch raw asset metrics via bridge (texture px / mesh LOD triangles), with tried/api evidence.
 
@@ -155,8 +167,23 @@ def get_asset_metrics(asset_paths, max_assets=20, project=None):
     if err:
         return err
     return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call(
-        "get_asset_metrics", {"asset_paths": list(asset_paths or []), "max_assets": int(max_assets)})
+        "get_asset_metrics", {"asset_paths": _as_path_list(asset_paths), "max_assets": int(max_assets)})
 
+
+def scan_orphan_assets(folder="/Game", limit=2000, offset=0, max_orphans=200, recent_days=14, cascade=True, project=None):
+    """扫描 /Game 孤儿资产（引用图里无任何引用者）：给可回收体量 + 按目录聚合 + 逐条 size/可信度。只读。Needs live bridge.
+
+    工程越大越慢：limit 控制本窗口最多检查多少资产，offset 翻页；orphans 按 size 降序截到 max_orphans。
+    confidence=suspect 者（可能按名/软路径加载或刚改动）删除前务必二次校验+走版本管理。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call(
+        "scan_orphan_assets",
+        {"folder": folder, "limit": int(limit), "offset": int(offset),
+         "max_orphans": int(max_orphans), "recent_days": int(recent_days),
+         "cascade": cascade})
 
 # ---------------- 离线工具（读磁盘） ----------------
 
@@ -485,7 +512,7 @@ def migrate_asset(asset_path, dest_path, new_name=None, dry_run=True, confirm=Fa
 
 _TOOLS = (
     ping, list_level_actors, describe_asset, get_asset_references, get_asset_metrics,
-    get_asset_chain,
+    get_asset_chain, scan_orphan_assets,
     read_editor_log, scan_folder_assets,
     cook_package, get_cook_status, attribute_cook_errors,
     get_perf_report, list_perf_rules,
