@@ -7,7 +7,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![UE](https://img.shields.io/badge/UE-5.0%20%E2%80%93%205.8%2B-blue)
 ![PyPI](https://img.shields.io/pypi/v/ue-prism)
-![状态](https://img.shields.io/badge/状态-v1.1-brightgreen)
 
 ## 能做什么
 
