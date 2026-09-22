@@ -158,3 +158,25 @@ def test_status_unknown_task(uat_env):
     env = server.get_cook_status("cook-nope-0000")
     assert env["ok"] is False
     assert env["error"]["code"] == envelope.Code.TASK_NOT_FOUND
+
+
+# ---------- MCP 字符串 bool 归一化（truthy 陷阱回归） ----------
+
+def test_string_bool_double_key_launches(uat_env):
+    """MCP 通道把 bool 以字符串送达："false"/"true" 必须能真正满足双钥启动（回归 "False" 恒真陷阱）。"""
+    env = server.cook_package(dry_run="false", confirm="true")
+    assert env["ok"], env
+    assert env["result"].get("task_id")
+    _wait(env["result"]["task_id"], "succeeded")
+
+
+def test_string_single_key_refused(uat_env):
+    env = server.cook_package(dry_run="false", confirm="false")
+    assert env["ok"] and env["result"]["dry_run"] is True
+    assert tasks.list_records(uat_env["bus"]) == []   # 单钥仍零副作用
+
+
+def test_unparsable_bool_rejected(uat_env):
+    env = server.cook_package(dry_run="maybe", confirm="true")
+    assert env["ok"] is False and env["error"]["code"] == envelope.Code.RUNTIME_ERROR
+    assert tasks.list_records(uat_env["bus"]) == []
