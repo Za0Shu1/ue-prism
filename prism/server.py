@@ -16,6 +16,9 @@ import argparse
 import os
 import re
 import traceback
+from typing import Annotated
+
+from pydantic import Field
 
 from . import attributelog, bus, envelope, folderscan, logscan, registry, rules, tasks, uat
 
@@ -113,7 +116,7 @@ def _resolve_offline_dir(project_dir=None, project=None):
 
 # ---------------- 桥工具（编辑器在线） ----------------
 
-def ping(project: str | None = None):
+def ping(project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Ping the in-editor bridge: heartbeat, UE version, project dir, loaded maps."""
     bus_dir, _pd, err = _resolve(project)
     if err:
@@ -121,7 +124,7 @@ def ping(project: str | None = None):
     return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call("ping", {})
 
 
-def list_level_actors(class_contains: str | None = None, tag: str | None = None, limit: int = 200, project: str | None = None):
+def list_level_actors(class_contains: Annotated[str | None, Field(description="按 Actor 类名子串过滤（不区分大小写）")] = None, tag: Annotated[str | None, Field(description="按 Actor tag 过滤")] = None, limit: Annotated[int, Field(description="最多返回的 Actor 数（截断带 truncated 标记）")] = 200, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """List actors in the loaded level (name/class/label/path/location/components). Needs the live bridge."""
     bus_dir, _pd, err = _resolve(project)
     if err:
@@ -132,7 +135,7 @@ def list_level_actors(class_contains: str | None = None, tag: str | None = None,
     )
 
 
-def describe_asset(asset_path: str, project: str | None = None):
+def describe_asset(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Read one asset's registry metadata (class/package/on-disk size). Needs the live bridge."""
     bus_dir, _pd, err = _resolve(project)
     if err:
@@ -141,7 +144,7 @@ def describe_asset(asset_path: str, project: str | None = None):
         "describe_asset", {"asset_path": asset_path})
 
 
-def get_asset_references(asset_path: str, direction: str = "both", recursive: bool = False, limit: int = 500, project: str | None = None):
+def get_asset_references(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], direction: Annotated[str, Field(description="uses=依赖它的 | used_by=引用它的 | both=双向")] = "both", recursive: Annotated[bool, Field(description="true=递归展开依赖闭包（深度/节点数有上限）")] = False, limit: Annotated[int, Field(description="每方向返回条数上限")] = 500, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Reference graph via AssetRegistry: uses(依赖)/used_by(被引用). direction in both|uses|used_by. Needs live bridge."""
     bus_dir, _pd, err = _resolve(project)
     if err:
@@ -152,7 +155,7 @@ def get_asset_references(asset_path: str, direction: str = "both", recursive: bo
     )
 
 
-def get_asset_chain(asset_path: str, direction: str = "uses", scope: str = "game", with_meta: bool = True, max_nodes: int = 2000, max_depth: int = 0, project: str | None = None):
+def get_asset_chain(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], direction: Annotated[str, Field(description="uses（要带走的依赖链）| used_by（连累面）")] = "uses", scope: Annotated[str, Field(description="game=只含 /Game（默认）| all=含引擎资产")] = "game", with_meta: Annotated[bool, Field(description="true=逐节点补类名/磁盘大小并按类别聚合")] = True, max_nodes: Annotated[int, Field(description="闭包节点总数上限")] = 2000, max_depth: Annotated[int, Field(description="0=不限深度；>0 限制递归层数")] = 0, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """递归依赖闭包（迁移预览）：uses=该资产依赖的整条链(迁移要带走)；used_by=谁依赖它(连累面)。
     scope=game(默认)只留 /Game；with_meta 给每节点补 class+size_bytes 并按类别聚合体量。Needs live bridge."""
     bus_dir, _pd, err = _resolve(project)
@@ -175,7 +178,7 @@ def _as_path_list(value):
     return [t for t in (str(x).strip() for x in seq) if t]
 
 
-def get_asset_metrics(asset_paths: str, max_assets: int = 20, project: str | None = None):
+def get_asset_metrics(asset_paths: Annotated[str, Field(description="多个 /Game 路径，支持逗号/分号/换行分隔")], max_assets: Annotated[int, Field(description="本次最多载入编辑器内存的资产数（保持小值）")] = 20, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Batch raw asset metrics via bridge (texture px / mesh LOD triangles), with tried/api evidence.
 
     Loads assets into editor memory as a side effect - keep max_assets small. Needs live bridge.
@@ -187,7 +190,7 @@ def get_asset_metrics(asset_paths: str, max_assets: int = 20, project: str | Non
         "get_asset_metrics", {"asset_paths": _as_path_list(asset_paths), "max_assets": int(max_assets)})
 
 
-def scan_orphan_assets(folder: str = "/Game", limit: int = 2000, offset: int = 0, max_orphans: int = 200, recent_days: int = 14, cascade: bool = True, project: str | None = None):
+def scan_orphan_assets(folder: Annotated[str, Field(description="扫描范围，Content 下目录前缀（默认 /Game）")] = "/Game", limit: Annotated[int, Field(description="本窗口最多检查的资产数")] = 2000, offset: Annotated[int, Field(description="分页偏移")] = 0, max_orphans: Annotated[int, Field(description="孤儿输出上限（按 size 降序截断）")] = 200, recent_days: Annotated[int, Field(description="近 N 天有改动的标记 suspect（删除前须二次校验）")] = 14, cascade: Annotated[bool, Field(description="true=追加级联可回收上限（仅被孤儿引用的依赖）")] = True, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """扫描 /Game 孤儿资产（引用图里无任何引用者）：给可回收体量 + 按目录聚合 + 逐条 size/可信度。只读。Needs live bridge.
 
     工程越大越慢：limit 控制本窗口最多检查多少资产，offset 翻页；orphans 按 size 降序截到 max_orphans。
@@ -204,7 +207,7 @@ def scan_orphan_assets(folder: str = "/Game", limit: int = 2000, offset: int = 0
 
 # ---------------- 离线工具（读磁盘） ----------------
 
-def read_editor_log(level: str = "Error", tail: int = 2000, top: int = 30, project_dir: str | None = None, project: str | None = None):
+def read_editor_log(level: Annotated[str, Field(description="Error|Warning|Display|All")] = "Error", tail: Annotated[int, Field(description="从日志末尾读取的行数")] = 2000, top: Annotated[int, Field(description="聚合分组上限")] = 30, project_dir: Annotated[str | None, Field(description="显式工程目录（与 project= 二选一）")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Aggregate editor log lines by message (category/count/first_seen/sample). Offline; no bridge needed."""
     pd, err = _resolve_offline_dir(project_dir, project)
     if err:
@@ -217,7 +220,7 @@ def read_editor_log(level: str = "Error", tail: int = 2000, top: int = 30, proje
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e), traceback.format_exc())
 
 
-def scan_folder_assets(folder: str = "/Game", sort: str = "size", limit: int = 500, project_dir: str | None = None, project: str | None = None):
+def scan_folder_assets(folder: Annotated[str, Field(description="Content 下文件夹，/Game 前缀可省略")] = "/Game", sort: Annotated[str, Field(description="size（默认）| path")] = "size", limit: Annotated[int, Field(description="返回条数上限")] = 500, project_dir: Annotated[str | None, Field(description="显式工程目录（与 project= 二选一）")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Audit on-disk assets under <project>/Content: sorted by size + per-type totals. Offline; no bridge."""
     pd, err = _resolve_offline_dir(project_dir, project)
     if err:
@@ -232,8 +235,8 @@ def scan_folder_assets(folder: str = "/Game", sort: str = "size", limit: int = 5
 
 # ---------------- cook / package（写操作，双钥确认） ----------------
 
-def cook_package(platform: str = "Windows", mode: str = "cook", configuration: str = "Development", map: str | None = None,
-                 output_dir: str | None = None, iterate: bool | None = None, dry_run: bool = True, confirm: bool = False, project: str | None = None):
+def cook_package(platform: Annotated[str, Field(description="当前仅支持 Windows")] = "Windows", mode: Annotated[str, Field(description="cook | package")] = "cook", configuration: Annotated[str, Field(description="构建配置，如 Development/Shipping")] = "Development", map: Annotated[str | None, Field(description="要 cook 的地图（如 /Game/NewMap）；错误地图名会被 UE 静默忽略，先用 ping 核对 loaded_maps")] = None,
+                 output_dir: Annotated[str | None, Field(description="package 模式的输出目录")] = None, iterate: Annotated[bool | None, Field(description="增量开关；缺省 cook=True / package=False")] = None, dry_run: Annotated[bool, Field(description="默认 true=只回预览/计划，不落盘不启动")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=false 且 confirm=true 双钥（写操作契约）")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Trigger UE cook/package via UAT on the server side (first iteration Windows-only).
 
     mode: cook | package. DEFAULT dry_run: only returns assembled command + env checks.
@@ -281,7 +284,7 @@ def cook_package(platform: str = "Windows", mode: str = "cook", configuration: s
     return uat.submit(bus_dir, pd, platform, mode, configuration, map, output_dir, bool(iterate))
 
 
-def get_cook_status(task_id: str, tail: int = 20, project: str | None = None):
+def get_cook_status(task_id: Annotated[str, Field(description="cook_package 返回的任务 id")], tail: Annotated[int, Field(description="日志尾部行数")] = 20, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Lazy-derived status of a cook/package task: {status, exit_code?, log, log_tail}.
 
     Status is recomputed from on-disk facts at read time (done marker / deadline /
@@ -302,7 +305,7 @@ def get_cook_status(task_id: str, tail: int = 20, project: str | None = None):
     return envelope.make_ok(v)
 
 
-def attribute_cook_errors(task_id: str | None = None, log_path: str | None = None, top: int = 30, project: str | None = None):
+def attribute_cook_errors(task_id: Annotated[str | None, Field(description="cook 任务 id（与 log_path 二选一）")] = None, log_path: Annotated[str | None, Field(description="显式日志文件路径（与 task_id 二选一）")] = None, top: Annotated[int, Field(description="错误分组上限")] = 30, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Group cook/editor log Error lines by fingerprint and attribute them to /Game assets.
 
     Provide task_id (from cook_package) or an explicit log_path. Offline-safe; when the
@@ -335,7 +338,7 @@ def attribute_cook_errors(task_id: str | None = None, log_path: str | None = Non
 
 # ---------------- 性能规则 ----------------
 
-def get_perf_report(scope: str = "/Game", target: str | None = None, project: str | None = None, recent_tasks: int = rules.DEFAULT_RECENT_TASKS):
+def get_perf_report(scope: Annotated[str, Field(description="必须是 Content 下真实存在的文件夹（/Game 前缀可省）；无效值直接报错不出残缺报告")] = "/Game", target: Annotated[str | None, Field(description="pc|console|mobile；缺省读 prism.toml 否则 pc")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None, recent_tasks: Annotated[int, Field(description="cook 类规则只审计最近 N 个成功 cook/package 档案（陈旧证据自动过期）；0=全部历史供取证")] = rules.DEFAULT_RECENT_TASKS):
     """Static performance audit from the offline rule pack (v0.3 PR-A).
 
     Reads disk + cook task archives only; findings carry rule_id/severity/subject/
@@ -363,7 +366,7 @@ def get_perf_report(scope: str = "/Game", target: str | None = None, project: st
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e), traceback.format_exc())
 
 
-def list_perf_rules(target: str | None = None, project: str | None = None):
+def list_perf_rules(target: Annotated[str | None, Field(description="pc|console|mobile")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """List active rule pack (id/channel/thresholds/doc) for report explainability."""
     _b, pd, _err = _resolve(project, allow_stale=True)
     try:
@@ -449,7 +452,7 @@ def _build_plan(client, ap, new_name, dest_path, include_impact=True, impact_lim
     }
     return plan, None
 
-def preview_asset_migration(asset_path: str, new_name: str | None = None, dest_path: str | None = None, project: str | None = None, impact_limit: int = 200):
+def preview_asset_migration(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], new_name: Annotated[str | None, Field(description="目标改名（可选）")] = None, dest_path: Annotated[str | None, Field(description="目标目录（可选，如 /Game/Moved）")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None, impact_limit: Annotated[int, Field(description="引用者清单上限")] = 200):
     """Dry-run 迁移预览（纯只读）：解析目标路径 + 冲突检测 + used_by 影响面，绝不改动任何东西。
 
     给 new_name -> 计划改名；给 dest_path -> 计划移动到该目录（可与 new_name 同时）。
@@ -522,19 +525,19 @@ def _migrate(op, asset_path, new_name, dest_path, dry_run, confirm, project, fix
     return client.call("migrate_asset_move", {"asset_path": ap, "dest_path": dp, "new_name": nn, "confirm": True, "fixup_redirectors": fixup_redirectors})
 
 
-def migrate_asset_rename(asset_path: str, new_name: str, dry_run: bool = True, confirm: bool = False, project: str | None = None, fixup_redirectors: bool = True):
+def migrate_asset_rename(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], new_name: Annotated[str, Field(description="新资产名（不含路径）")], dry_run: Annotated[bool, Field(description="默认 true=只回预览/计划，不落盘不启动")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=false 且 confirm=true 双钥（写操作契约）")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None, fixup_redirectors: Annotated[bool, Field(description="true=改名成功后清一次重定向桩")] = True):
     """真改名（写操作 · 双钥）。默认 dry_run 只回计划；dry_run=False 且 confirm=True 才落盘。
     UE 自动修引用（内存态，需保存）；成功后默认清一次重定向桩(fixup_redirectors)，可用 False 关闭。"""
     return _migrate("rename", asset_path, new_name, None, dry_run, confirm, project, fixup_redirectors)
 
 
-def migrate_asset_move(asset_path: str, dest_path: str, new_name: str | None = None, dry_run: bool = True, confirm: bool = False, project: str | None = None, fixup_redirectors: bool = True):
+def migrate_asset_move(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], dest_path: Annotated[str, Field(description="目标目录（/Game 前缀可省）")], new_name: Annotated[str | None, Field(description="移动同时改名（可选）")] = None, dry_run: Annotated[bool, Field(description="默认 true=只回预览/计划，不落盘不启动")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=false 且 confirm=true 双钥（写操作契约）")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None, fixup_redirectors: Annotated[bool, Field(description="true=移动成功后清一次重定向桩")] = True):
     """真移动（写操作 · 双钥）。默认 dry_run 只回计划；双钥满足才落盘。可带 new_name 同时改名。
     成功后默认清一次重定向桩(fixup_redirectors)，可用 False 关闭。"""
     return _migrate("move", asset_path, new_name, dest_path, dry_run, confirm, project, fixup_redirectors)
 
 
-def migrate_asset(asset_path: str, dest_path: str, new_name: str | None = None, dry_run: bool = True, confirm: bool = False, project: str | None = None):
+def migrate_asset(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], dest_path: Annotated[str, Field(description="目标目录（镜像结构复制，原件不动）")], new_name: Annotated[str | None, Field(description="副本改名（可选）")] = None, dry_run: Annotated[bool, Field(description="默认 true=只回预览/计划，不落盘不启动")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=false 且 confirm=true 双钥（写操作契约）")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """迁移(A·同工程复制)：资产+其 /Game uses 闭包按镜像结构复制到 dest 目录。默认 dry_run 只回复制计划；
     双钥(dry_run=False+confirm=True)才落盘。原件不动。Needs live bridge."""
     bus_dir, _pd, err = _resolve(project)
