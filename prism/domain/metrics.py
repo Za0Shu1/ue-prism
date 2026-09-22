@@ -158,13 +158,35 @@ _MEASURERS = {
 }
 
 
+def _as_path_list(value):
+    """Normalize asset_paths into a list.
+
+    Accepts list/tuple as-is, or a string split on comma / newline / semicolon.
+    Guards against list(str) exploding a comma-joined string char by char.
+    """
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        seq = list(value)
+    else:
+        import re
+        seq = re.split(r"[,\n;]+", str(value))
+    out = []
+    for x in seq:
+        t = str(x).strip()
+        if t:
+            out.append(t)
+    return out
+
+
 @register
 def get_asset_metrics(asset_paths=None, max_assets=20):
     """批量原始度量（纹理 px / 网格 LOD 三角）。items 逐项带 class/metrics/tried/note。"""
-    paths = list(asset_paths or [])
-    truncated = len(paths) > int(max_assets)
+    paths = _as_path_list(asset_paths)
+    requested = len(paths)
+    truncated = requested > int(max_assets)
     paths = paths[:int(max_assets)]
-    result = {"items": [], "requested": len(list(asset_paths or [])),
+    result = {"items": [], "requested": requested,
               "count": 0, "truncated": truncated, "cap": int(max_assets)}
     try:
         import unreal
