@@ -203,6 +203,7 @@ def test_scene_light_dup_unit():
         {"class": "SkyLight", "name": "c"}, {"class": "PlayerStart", "name": "d"}]}
     out = rules._rule_scene_light_dup(ctx)
     assert len(out) == 1 and out[0]["evidence"]["counts"] == {"DirectionalLight": 2}
+    assert out[0]["subject"] == "DirectionalLight x2"   # subject 是灯光计数而非 scope 串
 
 
 # ---------- PR-D：cook_empty_maps ----------
@@ -339,3 +340,24 @@ def test_noop_incremental_cook_not_flagged(tmp_path):
     open(umap, "wb").write(b"x")
     rep2 = rules.run_report(proj, b)
     assert [f for f in rep2["findings"] if f["rule_id"] == "cook_empty_maps"] == []
+
+
+def test_cook_drop_disk_recheck(tmp_path):
+    """现状复核：窗口内任务的 drop 若资产现已在磁盘(修复后待重 cook) -> 静默；
+    磁盘确实没有 -> 仍报 error 并带 disk_check=package_absent。"""
+    proj = _proj(tmp_path)
+    b = _bus(tmp_path)
+    _drop_task(b, proj, pkg="/Game/StillGone/Mesh")
+    rep_missing = rules.run_report(proj, b)
+    hits = [f for f in rep_missing["findings"] if f["rule_id"] == "cook_drop"]
+    assert len(hits) == 1
+    assert hits[0]["subject"] == "/Game/StillGone/Mesh"
+    assert hits[0]["evidence"]["disk_check"] == "package_absent"
+    # 把其中一个被 drop 的包"修好"(落盘 .uasset) 并再造一条同包 drop 档案 -> 复核后不报
+    fixed = os.path.join(proj, "Content", "Fixed")
+    os.makedirs(fixed)
+    open(os.path.join(fixed, "Mesh.uasset"), "wb").write(b"z")
+    _drop_task(b, proj, pkg="/Game/Fixed/Mesh")
+    rep_fixed = rules.run_report(proj, b)
+    subs = {f["subject"] for f in rep_fixed["findings"] if f["rule_id"] == "cook_drop"}
+    assert "/Game/Fixed/Mesh" not in subs and "/Game/StillGone/Mesh" in subs

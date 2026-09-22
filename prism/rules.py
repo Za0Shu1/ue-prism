@@ -156,6 +156,15 @@ def _rule_asset_size_top(ctx):
     return out
 
 
+def _package_on_disk(project_dir, pkg):
+    """/Game 包现状复核：Content/<路径>.uasset/.umap 存在 = 依赖已修复（修复后待重 cook）。"""
+    rel = str(pkg)[len("/Game"):].strip("/").split("/")
+    if not rel or not rel[0]:
+        return False
+    base = os.path.join(str(project_dir), "Content", *rel)
+    return os.path.isfile(base + ".uasset") or os.path.isfile(base + ".umap")
+
+
 def _rule_cook_drop(ctx):
     out = []
     reported = set()  # 窗口新→旧遍历：同一 subject 只归最新档案，更新的成功 cook 会让陈旧证据自动过期
@@ -179,6 +188,10 @@ def _rule_cook_drop(ctx):
                 key = found[0] if found else rec["task_id"]
                 if key in seen or key in reported:
                     continue
+                if key.startswith("/Game") and _package_on_disk(ctx["project_dir"], key):
+                    seen.add(key)
+                    reported.add(key)
+                    continue  # 现状复核：包已在磁盘(修复后未重 cook)，该警告已不代表当前状态
                 seen.add(key)
                 reported.add(key)
                 hits += 1
@@ -186,9 +199,11 @@ def _rule_cook_drop(ctx):
                             "subject": found[0] if found else rec["task_id"],
                             "evidence": {"task_id": rec["task_id"], "line_no": i + 1,
                                          "task_created_ts": rec.get("created_ts"),
+                                         "disk_check": ("package_absent" if key.startswith("/Game") else "unverifiable"),
                                          "excerpt": raw.strip()[:200]},
                             "threshold": None,
-                            "advice": "cook succeeded but content was dropped; restore/fix the missing dependency"})
+                            "advice": "cook succeeded but content was dropped (and package is still absent on disk); "
+                                      "restore/fix the missing dependency"})
     return out
 
 
@@ -261,7 +276,8 @@ def _rule_scene_light_dup(ctx):
     dups = {k: v for k, v in counts.items() if v > int(th["max_dup"])}
     if not dups:
         return []
-    return [{"rule_id": "scene_light_dup", "severity": "warn", "subject": ctx.get("scope", "/Game"),
+    return [{"rule_id": "scene_light_dup", "severity": "warn",
+             "subject": ", ".join("%s x%d" % (k, v) for k, v in sorted(dups.items())),
              "evidence": {"counts": dups, "actors_total": len(actors)}, "threshold": int(th["max_dup"]),
              "advice": "duplicate directional/skylights cost double lighting passes; keep one of each"}]
 
