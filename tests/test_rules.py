@@ -318,3 +318,24 @@ def test_server_perf_report_scope_and_window(tmp_path):
     finally:
         server._CFG["project_dir"] = None
         server._CFG["bus_dir"] = None
+
+
+def test_noop_incremental_cook_not_flagged(tmp_path):
+    """回归(-iterate 全 up-to-date)：日志无该 map 逐包行，但磁盘 cook 产物在 -> 不得误报 map_not_cooked；
+    产物缺失(真·坏 map 名)仍必须报错。"""
+    proj = _proj(tmp_path)
+    b = _bus(tmp_path)
+    noop_log = ("LogCook: Display: Keeping 453. Recooking 0. Removing 0.\n"
+                "LogCook: Display: Cooked packages 466 Packages Remain 0 Total 466\nBUILD SUCCESSFUL\n")
+    _task_with_log(b, proj, 'UAT BuildCookRun -iterate +maps="/Game/NewMap"', noop_log)
+    # 产物不存在 -> 必须报（保守方向：宁可多报也不漏报）
+    rep = rules.run_report(proj, b)
+    hits = [f for f in rep["findings"] if f["rule_id"] == "cook_empty_maps"]
+    assert len(hits) == 1 and hits[0]["subject"] == "/Game/NewMap"
+    assert hits[0]["evidence"]["disk_check"] == "cooked_artifact_absent"
+    # 落盘 Saved/Cooked/Windows/Proj/Content/NewMap.umap -> 同一条日志不再报
+    umap = os.path.join(proj, "Saved", "Cooked", "Windows", "Proj", "Content", "NewMap.umap")
+    os.makedirs(os.path.dirname(umap))
+    open(umap, "wb").write(b"x")
+    rep2 = rules.run_report(proj, b)
+    assert [f for f in rep2["findings"] if f["rule_id"] == "cook_empty_maps"] == []
