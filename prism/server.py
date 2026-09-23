@@ -155,16 +155,17 @@ def get_asset_references(asset_path: Annotated[str, Field(description="/Game 包
     )
 
 
-def get_asset_chain(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], direction: Annotated[str, Field(description="uses（要带走的依赖链）| used_by（连累面）")] = "uses", scope: Annotated[str, Field(description="game=只含 /Game（默认）| all=含引擎资产")] = "game", with_meta: Annotated[bool, Field(description="true=逐节点补类名/磁盘大小并按类别聚合")] = True, max_nodes: Annotated[int, Field(description="闭包节点总数上限")] = 2000, max_depth: Annotated[int, Field(description="0=不限深度；>0 限制递归层数")] = 0, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+def get_asset_chain(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], direction: Annotated[str, Field(description="uses（要带走的依赖链）| used_by（连累面）")] = "uses", scope: Annotated[str, Field(description="game=只含 /Game（默认）| all=含引擎资产")] = "game", with_meta: Annotated[bool, Field(description="true=逐节点补类名/磁盘大小并按类别聚合")] = True, max_nodes: Annotated[int, Field(description="闭包节点总数上限")] = 2000, max_depth: Annotated[int, Field(description="0=不限深度；>0 限制递归层数")] = 0, god_min_refs: Annotated[int, Field(description="uses 闭包共享枢纽阈值：/Game 引用者 >= 此值标 god_asset；0=关闭（仅 uses 方向生效）")] = 30, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """递归依赖闭包（迁移预览）：uses=该资产依赖的整条链(迁移要带走)；used_by=谁依赖它(连累面)。
-    scope=game(默认)只留 /Game；with_meta 给每节点补 class+size_bytes 并按类别聚合体量。Needs live bridge."""
+    scope=game(默认)只留 /Game；with_meta 给每节点补 class+size_bytes 并按类别聚合体量。
+    加固：cycles=闭包内耦合环(不可拆分子集迁移)；god_assets=uses 链上的共享枢纽(used_by_game>=阈值)；impact_summary=used_by 影响半径摘要(波及关卡/按类体量)。Needs live bridge."""
     bus_dir, _pd, err = _resolve(project)
     if err:
         return err
     return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call(
         "get_asset_chain",
         {"asset_path": asset_path, "direction": direction, "scope": scope, "with_meta": with_meta,
-         "max_nodes": max_nodes, "max_depth": max_depth})
+         "max_nodes": max_nodes, "max_depth": max_depth, "god_min_refs": god_min_refs})
 
 
 def _as_path_list(value):
