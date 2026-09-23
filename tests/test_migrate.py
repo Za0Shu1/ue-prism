@@ -170,17 +170,19 @@ def test_bfs_closure_levels_dedup_and_cap():
 
     def hop(pkg):
         return graph.get(pkg, ([], None))
-    nodes, total, truncated, depth, sig = A._bfs_closure(hop, "/Game/Root", 2000, 0)
+    nodes, total, truncated, depth, sig, dep_map = A._bfs_closure(hop, "/Game/Root", 2000, 0)
     pkgs = [n["package"] for n in nodes]
     assert "/Game/C" in pkgs and "/Game/D" in pkgs
     assert pkgs.count("/Game/C") == 1
     assert "/Game/Root" not in pkgs
     assert total == 4
+    assert sorted(dep_map["/Game/Root"]) == ["/Game/A", "/Game/B"]
+    assert dep_map["/Game/D"] == ["/Game/Root", "/Game/A"]  # 回边在邻接表留痕，供 SCC 判环
     lv = {}
     for n in nodes:
         lv[n["package"]] = n["level"]
     assert lv["/Game/A"] == 1 and lv["/Game/C"] == 2
-    n2, total2, trunc2, d2, s2 = A._bfs_closure(hop, "/Game/Root", 1, 0)
+    n2, total2, trunc2, d2, s2, _dm2 = A._bfs_closure(hop, "/Game/Root", 1, 0)
     assert total2 == 1 and trunc2 is True
 
 
@@ -188,6 +190,8 @@ def test_asset_chain_no_engine_degrade():
     from prism.domain import assets as A
     r = A.get_asset_chain("/Game/A/B")
     assert isinstance(r, dict) and r.get("note") == "no_engine" and r["total"] == 0
+    assert r["cycles"] == [] and r["cyclic"] is False and r["cycles_truncated"] is False
+    assert r["god_assets"] == [] and r["god_scan"] is None and r["impact_summary"] is None
 
 
 

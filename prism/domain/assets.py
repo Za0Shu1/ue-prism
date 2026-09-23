@@ -314,11 +314,14 @@ def referencers_many(paths=None, cap=10, limit=60):
 
 def _bfs_closure(hop, root, max_nodes=2000, max_depth=0):
     """通用逐跳 BFS 闭包（纯逻辑，无引擎可测）。hop(pkg)->(deps, sig)。
-    返回 (nodes[level 从1起], total, truncated, depth_reached, api_sig)。"""
+    返回 (nodes[level 从1起], total, truncated, depth_reached, api_sig, dep_map)。
+    dep_map={已展开包: [其原始依赖]}（含 root、未过滤）：闭包元数据只留首次发现，
+    环检测必须靠邻接表把回边留住——见 _find_cycles。"""
     from collections import deque
     seen = set([root])
     queue = deque([(root, 0)])
     nodes = []
+    dep_map = {}
     api_sig = None
     truncated = False
     while queue:
@@ -326,6 +329,7 @@ def _bfs_closure(hop, root, max_nodes=2000, max_depth=0):
         if max_depth and lvl >= max_depth:
             continue
         deps, sig = hop(cur)
+        dep_map[cur] = list(deps)  # 邻接表留痕：回边/交叉边不随去重丢失
         if api_sig is None and sig:
             api_sig = sig
         for d in deps:
@@ -343,11 +347,88 @@ def _bfs_closure(hop, root, max_nodes=2000, max_depth=0):
     for n in nodes:
         if n["level"] > depth_reached:
             depth_reached = n["level"]
-    return nodes, len(nodes), truncated, depth_reached, api_sig
+    return nodes, len(nodes), truncated, depth_reached, api_sig, dep_map
+
+
+def _find_cycles(dep_map, in_scope, root, cap=20):
+    """环检测（纯逻辑，无引擎可测）：在 (root ∪ in_scope) 诱导子图上跑 Kosaraju 迭代 SCC。
+    BFS 去重会把回边静默丢掉——真环(双向耦合、迁移不可拆分)与 DAG 交叉边在闭包里长得一样，
+    只有拿邻接表重算 SCC 才分得开。自环(size=1 且自指)也算环。迭代实现：不受递归深度限制(3.7)。
+    返回 (cycles, truncated)：cycles=[{members, size, contains_root, self_loop}]，按 size 降序、截到 cap。"""
+    nodes = set(in_scope)
+    nodes.add(root)
+    fwd = {}
+    rev = {}
+    self_loops = set()
+    for a in nodes:
+        fwd[a] = []
+        rev[a] = []
+    for a in nodes:
+        for d in dep_map.get(a, ()):
+            if d not in nodes:
+                continue
+            if d == a:
+                self_loops.add(a)
+                continue
+            fwd[a].append(d)
+            rev[d].append(a)
+    visited = set()
+    order = []
+    for start in nodes:
+        if start in visited:
+            continue
+        visited.add(start)
+        stack = [(start, iter(fwd[start]))]
+        while stack:
+            node, it = stack[-1]
+            pushed = False
+            for nxt in it:
+                if nxt not in visited:
+                    visited.add(nxt)
+                    stack.append((nxt, iter(fwd[nxt])))
+                    pushed = True
+                    break
+            if not pushed:
+                order.append(node)
+                stack.pop()
+    comp_seen = set()
+    cycles = []
+    for start in reversed(order):
+        if start in comp_seen:
+            continue
+        comp_seen.add(start)
+        comp = [start]
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            for nxt in rev[node]:
+                if nxt not in comp_seen:
+                    comp_seen.add(nxt)
+                    comp.append(nxt)
+                    stack.append(nxt)
+        if len(comp) > 1 or comp[0] in self_loops:
+            cycles.append({"members": sorted(comp), "size": len(comp),
+                           "contains_root": root in comp,
+                           "self_loop": len(comp) == 1})
+    cycles.sort(key=lambda c: (-c["size"], c["members"][0]))
+    return cycles[:cap], len(cycles) > cap
+
+
+def _game_ref_count(ar, unreal, package):
+    """单包 /Game 反向引用计数（god-asset 判定用）：复用 _registry_graph 一跳，滤引擎与自身。
+    返回 (count, sig)；候选签名全失败返回 (None, None)——上层记未测，绝不把测不到伪装成 0。"""
+    refs, sig = _registry_graph(ar, unreal, "get_referencers", package, False)
+    if sig is None:
+        return None, None
+    count = 0
+    for r in refs:
+        if r.startswith("/Game/") and r != package:
+            count += 1
+    return count, sig
 
 
 @register
-def get_asset_chain(asset_path, direction="uses", scope="game", with_meta=True, max_nodes=2000, max_depth=0):
+def get_asset_chain(asset_path, direction="uses", scope="game", with_meta=True, max_nodes=2000, max_depth=0, god_min_refs=30):
     """递归依赖闭包（迁移预览）：direction=uses 取该资产依赖的整条链（迁移要一并带走的东西）；
     used_by 取谁依赖它（挪走会连累谁）。逐跳 BFS + 去重，节点带 level。纯只读，不改任何东西。
 
@@ -373,13 +454,22 @@ def get_asset_chain(asset_path, direction="uses", scope="game", with_meta=True, 
         max_depth = int(max_depth)
     except Exception:
         max_depth = 0
+    try:
+        god_min_refs = int(god_min_refs)
+    except Exception:
+        god_min_refs = 30
+    if god_min_refs < 0:
+        god_min_refs = 0
     package, object_path, _leaf = _normalize(asset_path)
     try:
         import unreal
     except Exception:
         return {"root": package, "direction": direction, "scope": scope, "found": False,
                 "nodes": [], "total": 0, "truncated": False, "cap": max_nodes, "depth_reached": 0,
-                "by_class": {}, "total_size_bytes": 0, "note": "no_engine"}
+                "by_class": {}, "total_size_bytes": 0,
+                "cycles": [], "cyclic": False, "cycles_truncated": False,
+                "god_assets": [], "god_scan": None, "impact_summary": None,
+                "note": "no_engine"}
     ar = _registry()
     if ar is None:
         return envelope.make_err(envelope.Code.UE_API_MISMATCH,
@@ -390,7 +480,7 @@ def get_asset_chain(asset_path, direction="uses", scope="game", with_meta=True, 
         return _registry_graph(ar, unreal, method, pkg, False)
 
     found = _asset_data(ar, unreal, package, object_path) is not None
-    raw_nodes, _t, truncated, depth_reached, api_sig = _bfs_closure(hop, package, max_nodes, max_depth)
+    raw_nodes, _t, truncated, depth_reached, api_sig, dep_map = _bfs_closure(hop, package, max_nodes, max_depth)
     if api_sig is None:
         return envelope.make_err(envelope.Code.UE_API_MISMATCH,
                                  "依赖跳取失败：%s 无候选签名命中（5.0-5.8 漂移？）" % method)
@@ -462,8 +552,78 @@ def get_asset_chain(asset_path, direction="uses", scope="game", with_meta=True, 
         "excluded": {"engine": n_engine, "script": n_script},
         "api": {"hop": api_sig},
     }
+    # —— 加固① 环检测：(root ∪ kept) 诱导子图 SCC；BFS 去重丢掉的回边在这里显式点名 ——
+    kept_pkgs = [n["package"] for n in kept]
+    cycles, cycles_truncated = _find_cycles(dep_map, kept_pkgs, package)
+    result["cycles"] = cycles
+    result["cyclic"] = bool(cycles)
+    result["cycles_truncated"] = cycles_truncated
+
+    # —— 加固② god-asset：uses 闭包里的共享枢纽（/Game 引用者 >= god_min_refs）——
+    #     枢纽是全库共享资产，"留在原地被引用"才是迁移正解；used_by 方向本身就是引用者名单，不重复判。
+    if direction == "uses" and god_min_refs > 0 and kept:
+        scan_cap = 400  # 编辑器内逐包 get_referencers：控单命令耗时，大闭包按体量优先扫
+        to_scan = sorted(kept, key=lambda d: -int(d.get("size_bytes") or 0))[:scan_cap]
+        hubs = []
+        hub_sig = None
+        for node in to_scan:
+            cnt, sig = _game_ref_count(ar, unreal, node["package"])
+            if cnt is None:
+                continue
+            if hub_sig is None:
+                hub_sig = sig
+            node["used_by_game"] = cnt
+            node["god_asset"] = cnt >= god_min_refs
+            if node["god_asset"]:
+                hubs.append(node)
+        hubs.sort(key=lambda d: -d["used_by_game"])
+        result["god_assets"] = [
+            {"package": h["package"], "class": h.get("class"), "level": h["level"],
+             "used_by_game": h["used_by_game"], "size_bytes": h.get("size_bytes", 0)}
+            for h in hubs[:20]]
+        result["god_scan"] = {"scanned": len(to_scan), "of": len(kept),
+                              "min_refs": god_min_refs, "hub_total": len(hubs), "sig": hub_sig}
+        if len(to_scan) < len(kept):
+            result["god_scan"]["note"] = "枢纽扫描仅覆盖体量最大的 %d 个节点，其余未测" % len(to_scan)
+    elif direction == "uses":
+        result["god_assets"] = []
+        result["god_scan"] = {"scanned": 0, "of": len(kept), "min_refs": 0,
+                              "hub_total": 0, "note": "disabled (god_min_refs=0)"}
+    else:
+        result["god_assets"] = []
+        result["god_scan"] = None
+
+    # —— 加固③ 影响半径摘要：used_by 方向给"波及 N 关卡 + 按类计数 + 总体量"的一行决策结论 ——
+    if direction == "used_by":
+        if with_meta:
+            worlds = [n for n in kept if n.get("class") == "World"]
+            result["impact_summary"] = {
+                "referencers_total": len(kept),
+                "worlds_total": len(worlds),
+                "worlds": [w["package"] for w in worlds[:20]],
+                "worlds_truncated": len(worlds) > 20,
+                "by_class": by_class,
+                "total_size_mb": result["total_size_mb"],
+            }
+        else:
+            result["impact_summary"] = {"referencers_total": len(kept),
+                                        "note": "with_meta=False：无类名，无法按关卡/类别拆分影响面"}
+    else:
+        result["impact_summary"] = None
+
+    notes = []
     if scope == "game" and (n_engine or n_script):
-        result["note"] = "已过滤引擎/Script 依赖（迁移仅需 /Game）；scope=all 可含全量"
+        notes.append("已过滤引擎/Script 依赖（迁移仅需 /Game）；scope=all 可含全量")
+    if cycles:
+        root_in = any(c["contains_root"] for c in cycles)
+        notes.append("检出环 %d 处%s：闭包内双向耦合，不可拆分子集迁移"
+                     % (len(cycles), "（根资产卷入）" if root_in else ""))
+    elif truncated:
+        notes.append("闭包被截断：环检测可能漏报，cyclic=False 不完全可信")
+    if cycles_truncated:
+        notes.append("环列表已截断（上限 20 组）")
+    if notes:
+        result["note"] = "; ".join(notes)
     return result
 
 # ---------------- scan_orphan_assets：孤儿资产扫描（只读·深度分析 P0） ----------------
