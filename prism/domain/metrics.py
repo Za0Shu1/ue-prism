@@ -172,7 +172,34 @@ def _measure_mesh(unreal, obj, tried):
             except Exception:
                 continue
         lods.append(entry)
-    return {"lods": lods, "lod_count": nlods}
+    out = {"lods": lods, "lod_count": nlods}
+    for name, call in (
+        ("get_lod_used_materials", lambda: len(obj.get_lod_used_materials(0))),
+        ("prop:render_materials", lambda: len(_prop(obj, "render_materials"))),
+    ):
+        try:
+            v = call()
+        except Exception:
+            tried.append(name + ":miss")
+            continue
+        if v:
+            out["material_slots"] = int(v)
+            tried.append(name)
+            break
+    for name, call in (
+        ("get_num_collision_triangles", lambda: obj.get_num_collision_triangles()),
+        ("get_collision_number", lambda: obj.get_collision_number()),
+    ):
+        try:
+            v = int(call())
+        except Exception:
+            tried.append(name + ":miss")
+            continue
+        if v:
+            out["collision_triangles"] = v
+            tried.append(name)
+            break
+    return out
 
 
 RUNTIME_HEAVY_MEM_MB = 8.0    # 纹理运行时内存 >= 此值(MB) = 真显存大户
@@ -351,7 +378,7 @@ def probe_asset_api(asset_path):
     obj = _load_object(unreal, object_path)
     if obj is None:
         return {"note": "load_failed", "query": object_path}
-    keys = ("size", "surface", "lod", "mip")
+    keys = ("size", "surface", "lod", "mip", "collision", "material")
     names = [n for n in dir(obj) if any(k in n.lower() for k in keys)]
     feedback = []
     for n in sorted(names)[:40]:
