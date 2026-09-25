@@ -33,9 +33,11 @@ def test_small_disk_not_bloat_candidate():
     assert v["verdict"] == "normal"
 
 
-def test_zero_mem_defends_division():
-    v = M._runtime_verdict(int(100 * MB), {"memory_bytes": 0})
+def test_zero_mem_but_derived_estimate_bloat():
+    # 常驻 0（未上传）+ 属性估算 20KB + 源盘 100MB -> 假大
+    v = M._runtime_verdict(int(100 * MB), {"memory_bytes": 0, "est_runtime_bytes": 20 * 1024})
     assert v["verdict"] == "disk_only_bloat"
+    assert v["runtime_basis"] == "derived_estimate"
 
 
 def test_mesh_no_mem_uses_triangles():
@@ -56,3 +58,48 @@ def test_missing_metrics_is_unknown():
 def test_garbage_values_never_crash():
     v = M._runtime_verdict("not-a-number", {"memory_bytes": "NaN-ish"})
     assert v["verdict"] == "unknown"
+
+def test_estimate_wins_over_unloaded_placeholder_memory():
+    # 真机(5.4)校准场景：T_BigNoise 首查常驻仅 4KB(未上传)，属性估算 ~22MB -> 真大
+    side = 4096
+    est = int(side * side * 1.33)
+    m = {"memory_bytes": 4096, "est_runtime_bytes": est}
+    v = M._runtime_verdict(int(54 * MB), m)
+    assert v["verdict"] == "runtime_heavy"
+    assert v["runtime_basis"] == "derived_estimate"
+    assert v["resident_mb"] == round(4096 / 1048576.0, 3)
+
+
+class _FakeClass(object):
+    def __init__(self, name):
+        self._n = name
+
+    def get_name(self):
+        return self._n
+
+
+class _FakeTex(object):
+    def __init__(self, name):
+        self._n = name
+
+    def get_class(self):
+        return _FakeClass(self._n)
+
+
+def test_derive_dims_texture2d_and_cube():
+    m = {"source_memory_bytes": 4096 * 4096 * 4, "width": 32, "height": 32}
+    M._derive_texture_geometry(_FakeTex("Texture2D"), m)
+    assert m["width"] == 4096 and m["size_derived"] is True
+    assert m["est_runtime_bytes"] == int(4096 * 4096 * 1.33)
+    # Cube: source 内存 = 6 面 RGBA8；128x128 立方图
+    mc = {"source_memory_bytes": 128 * 128 * 6 * 4}
+    M._derive_texture_geometry(_FakeTex("TextureCube"), mc)
+    assert mc["width"] == 128
+    assert mc["est_runtime_bytes"] == int(128 * 128 * 6 * 1.33)
+
+
+def test_derive_respects_max_size_cap():
+    m = {"source_memory_bytes": 4096 * 4096 * 4, "max_size": 128}
+    M._derive_texture_geometry(_FakeTex("Texture2D"), m)
+    assert m["width"] == 4096  # 边长仍是源尺寸
+    assert m["est_runtime_bytes"] == int(128 * 128 * 1.33)  # 估算按限幅后
