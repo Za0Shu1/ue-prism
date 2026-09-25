@@ -182,6 +182,9 @@ def _as_path_list(value):
 def get_asset_metrics(asset_paths: Annotated[str, Field(description="多个 /Game 路径，支持逗号/分号/换行分隔")], max_assets: Annotated[int, Field(description="本次最多载入编辑器内存的资产数（保持小值）")] = 20, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Batch raw asset metrics via bridge (texture px / mesh LOD triangles), with tried/api evidence.
 
+    每项附源盘大小(disk_bytes/disk_mb)与真大/假大判定：runtime_verdict
+    (runtime_heavy=真显存/帧大户 | disk_only_bloat=源盘膨胀运行时被限死 | normal | unknown)
+    与 is_runtime_heavy；纹理另采 compression/virtual_texture/max_size/array_size。
     Loads assets into editor memory as a side effect - keep max_assets small. Needs live bridge.
     """
     bus_dir, _pd, err = _resolve(project)

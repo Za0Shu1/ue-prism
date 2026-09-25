@@ -12,7 +12,7 @@ import os
 
 from .. import envelope
 from . import register
-from .assets import _asset_data, _class_name, _name_str, _normalize, _registry
+from .assets import _asset_data, _class_name, _disk_size, _name_str, _normalize, _registry
 
 
 def _load_object(unreal, object_path):
@@ -51,6 +51,9 @@ def _measure_texture(unreal, obj, tried):
         ("blueprint_get_size_x/y", lambda: (obj.blueprint_get_size_x(), obj.blueprint_get_size_y())),
         ("get_surface_sizes", lambda: obj.get_surface_sizes()),
         ("get_surface_size", lambda: obj.get_surface_size(0)),
+        ("get_surface_width/height", lambda: (obj.get_surface_width(), obj.get_surface_height())),
+        ("get_imported_width/height", lambda: (obj.get_imported_width(), obj.get_imported_height())),
+        ("get_array_size", lambda: (obj.get_array_size(), obj.get_array_size())),
     ):
         try:
             out = call()
@@ -79,7 +82,7 @@ def _measure_texture(unreal, obj, tried):
         except Exception:
             continue
     if m is None:
-        for key in ("source_size", "size_x"):
+        for key in ("source_size", "size_x", "imported_size_x"):
             if _prop(obj, key) is not None:
                 tried.append("prop:" + key)
                 src = _prop(obj, "source_size")
@@ -103,6 +106,28 @@ def _measure_texture(unreal, obj, tried):
         if v:
             m[key] = v
             tried.append(name)
+    # 压缩格式 / VirtualTexture 标记 / CubeArray 层数：跨版本候选，取不到留缺不崩
+    cs = _prop(obj, "compression_settings")
+    if cs is not None:
+        m["compression"] = str(cs)
+        tried.append("prop:compression_settings")
+    for key in ("virtual_texture_supported", "is_virtual"):
+        v = _prop(obj, key)
+        if v is not None:
+            m["virtual_texture"] = bool(v)
+            tried.append("prop:" + key)
+            break
+    for key in ("array_size", "slices"):
+        v = _prop(obj, key)
+        if v is not None:
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                continue
+            if v > 1:
+                m["array_size"] = v
+                tried.append("prop:" + key)
+                break
     return m
 
 
@@ -148,6 +173,66 @@ def _measure_mesh(unreal, obj, tried):
                 continue
         lods.append(entry)
     return {"lods": lods, "lod_count": nlods}
+
+
+RUNTIME_HEAVY_MEM_MB = 8.0    # 纹理运行时内存 >= 此值(MB) = 真显存大户
+MESH_HEAVY_TRIS = 200000      # 网格 LOD0 三角 >= 此值 = 真吃帧大户（与 rules.mesh_tri warn 同源）
+DISK_BLOAT_MIN_DISK_MB = 20.0  # "假大"只对源盘 >= 此值成立
+DISK_BLOAT_MAX_RUNTIME_MB = 2.0
+DISK_BLOAT_RATIO = 8.0         # 源盘/运行时 >= 此倍数 = 源盘膨胀（MaxSize/压缩已限死运行时）
+
+
+def _runtime_verdict(disk_bytes, m):
+    """纯逻辑：源盘大小 + 度量结果 -> 真大/假大判定（无数据不猜，可离线测）。
+
+    verdict 取值：
+    - runtime_heavy   运行时内存/三角超阈值，才是真该优化的大户；
+    - disk_only_bloat 源盘大但运行时被限死（典型：225MB 源 PNG，运行时 8KB），
+                      对包体/显存影响小，瘦身优先级应降级；
+    - normal          运行时可接受；
+    - unknown         缺度量数据，不下结论。
+    """
+    if not isinstance(m, dict):
+        return {"verdict": "unknown", "reason": "no_metrics"}
+    mem = m.get("memory_bytes")
+    try:
+        mem = float(mem) if mem is not None else None
+    except (TypeError, ValueError):
+        mem = None
+    if mem is not None:
+        mem_mb = mem / 1048576.0
+        out = {"runtime_mb": round(mem_mb, 3)}
+        if mem_mb >= RUNTIME_HEAVY_MEM_MB:
+            out["verdict"] = "runtime_heavy"
+            return out
+        try:
+            disk_bytes = float(disk_bytes) if disk_bytes else None
+        except (TypeError, ValueError):
+            disk_bytes = None
+        if disk_bytes:
+            disk_mb = disk_bytes / 1048576.0
+            out["disk_mb"] = round(disk_mb, 3)
+            if (disk_mb >= DISK_BLOAT_MIN_DISK_MB
+                    and mem_mb <= DISK_BLOAT_MAX_RUNTIME_MB
+                    and disk_mb / max(mem_mb, 1.0 / 1048576.0) >= DISK_BLOAT_RATIO):
+                out["verdict"] = "disk_only_bloat"
+                out["capped_by_max_size"] = bool(m.get("max_size"))
+                return out
+        out["verdict"] = "normal"
+        return out
+    lods = m.get("lods")
+    if lods:
+        top = 0
+        for l in lods:
+            try:
+                top = max(top, int(l.get("triangles") or 0))
+            except (TypeError, ValueError):
+                continue
+        if top >= MESH_HEAVY_TRIS:
+            return {"verdict": "runtime_heavy", "triangles_top_lod": top}
+        if top > 0:
+            return {"verdict": "normal", "triangles_top_lod": top}
+    return {"verdict": "unknown", "reason": "no_runtime_measure"}
 
 
 _MEASURERS = {
@@ -203,7 +288,9 @@ def get_asset_metrics(asset_paths=None, max_assets=20):
     for p in paths:
         package, object_path, _leaf = _normalize(p)
         item = {"query": package, "package_name": package, "class": None,
-                "metrics": None, "tried": [], "note": None}
+                "metrics": None, "tried": [], "note": None,
+                "disk_bytes": None, "disk_mb": None,
+                "runtime_verdict": "unknown", "is_runtime_heavy": None}
         tried = item["tried"]
         data = _asset_data(ar, unreal, package, object_path)
         if data is None:
@@ -212,6 +299,13 @@ def get_asset_metrics(asset_paths=None, max_assets=20):
             continue
         cls = _class_name(unreal, data)
         item["class"] = cls
+        try:
+            _fp, _sz = _disk_size(unreal, package)
+        except Exception:
+            _sz = None
+        if _sz:
+            item["disk_bytes"] = int(_sz)
+            item["disk_mb"] = round(int(_sz) / 1048576.0, 3)
         obj = _load_object(unreal, object_path)
         if obj is None:
             item["note"] = "load_failed"
@@ -232,6 +326,10 @@ def get_asset_metrics(asset_paths=None, max_assets=20):
                 measurable_failed += 1
                 item["note"] = "all_candidates_failed"
             else:
+                v = _runtime_verdict(item.get("disk_bytes"), m)
+                m["runtime_verdict"] = v
+                item["runtime_verdict"] = v["verdict"]
+                item["is_runtime_heavy"] = (v["verdict"] == "runtime_heavy")
                 item["metrics"] = m
         result["items"].append(item)
     result["count"] = len(result["items"])

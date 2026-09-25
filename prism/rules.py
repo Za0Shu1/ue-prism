@@ -336,6 +336,35 @@ def _rule_cook_empty_maps(ctx):
     return out
 
 
+def apply_runtime_verdicts(findings, metrics):
+    """bridge 在线时用运行时度量给 asset_size_top 消误报：假大(disk_only_bloat)降档 error->warn。
+
+    只降 disk_only_bloat 这一种有双证据(源盘 vs 运行时)的结论；
+    unknown/缺数据一律不动——宁可保守报大，不假装 certainty。返回降档条数。
+    """
+    changed = 0
+    if not metrics:
+        return 0
+    for f in findings:
+        if f.get("rule_id") != "asset_size_top":
+            continue
+        it = metrics.get(f.get("subject")) or {}
+        rv = (it.get("metrics") or {}).get("runtime_verdict") or {}
+        if rv.get("verdict") != "disk_only_bloat":
+            continue
+        ev = f.setdefault("evidence", {})
+        ev["runtime_verdict"] = "disk_only_bloat"
+        ev["runtime_mb"] = rv.get("runtime_mb")
+        ev["disk_mb"] = rv.get("disk_mb")
+        if f.get("severity") == "error":
+            f["severity"] = "warn"
+        f["advice"] = ("source-disk bloat only (runtime %.2fMB vs disk %.1fMB; MaxSize/compression "
+                       "caps runtime) - re-import at target res; do not chase cooked-size" %
+                       (rv.get("runtime_mb") or 0.0, rv.get("disk_mb") or 0.0))
+        changed += 1
+    return changed
+
+
 RULES = (
     {"id": "asset_size_top", "cfg": "asset_size_mb", "channel": "offline", "doc": "单资产磁盘大小超阈值", "run": _rule_asset_size_top},
     {"id": "cook_drop", "cfg": None, "channel": "offline", "doc": "cook succeeded 但日志含静默丢弃依赖告警（校准发现③）", "run": _rule_cook_drop},
@@ -377,6 +406,12 @@ def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP
             skipped.append("%s: %s" % (rule["id"], e))
         except Exception as e:
             skipped.append("%s: %s" % (rule["id"], str(e)[:120]))
+    runtime_downgraded = 0
+    if bridge_online:
+        try:
+            runtime_downgraded = apply_runtime_verdicts(findings, _ensure_metrics(ctx))
+        except Exception as e:
+            skipped.append("asset_size_top runtime downgrade: %s" % str(e)[:120])
     window_ids = [r["task_id"] for r in _cook_records(ctx)]
     rank = {"error": 0, "warn": 1}
     findings.sort(key=lambda x: (rank.get(x["severity"], 9), x["rule_id"], x["subject"]))  # 稳定序：diff 友好
@@ -392,6 +427,7 @@ def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP
         "note": "bridge rules measure top-80 largest assets (sampled, not exhaustive)" if bridge_online
         else "offline half-report (bridge rules skipped)",
         "summary": summary,
+        "runtime_size_downgraded": runtime_downgraded,
         "cook_archive": {"recent_tasks": recent_tasks,
                          "window_task_ids": window_ids,
                          "archive_total": ctx.get("cook_recs_total", len(window_ids))},
