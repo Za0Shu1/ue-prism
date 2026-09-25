@@ -51,3 +51,22 @@ def test_warn_stays_warn_but_gets_evidence():
     rules.apply_runtime_verdicts([f], _metrics("disk_only_bloat"))
     assert f["severity"] == "warn"
     assert f["evidence"]["runtime_verdict"] == "disk_only_bloat"
+
+def test_texture_size_capped_4k_downgraded_and_real_4k_stays():
+    """5.4 真机校准固化：MaxSize 限幅的假大 4K 降 warn，无限幅真 4K 保持 error。"""
+    ctx = {"profile": rules.PROFILES["pc"],
+           "metrics": {
+               "/Game/T/Fake": {"metrics": {"width": 4096, "height": 4096,
+                                    "memory_bytes": 4096, "max_size": 128,
+                                    "est_runtime_bytes": int(128 * 128 * 1.33)}},
+               "/Game/T/Real": {"metrics": {"width": 4096, "height": 4096,
+                                    "memory_bytes": 4096,
+                                    "est_runtime_bytes": int(4096 * 4096 * 1.33)}},
+           }}
+    out = {f["subject"]: f for f in rules._rule_texture_size(ctx)}
+    fake, real = out["/Game/T/Fake"], out["/Game/T/Real"]
+    assert fake["severity"] == "warn" and real["severity"] == "error"
+    assert fake["evidence"]["est_runtime_mb"] < 1
+    assert fake["evidence"]["resident_bytes"] == 4096
+    assert "capped by MaxSize" in fake["advice"]
+    assert "est_runtime_mb" in real["evidence"]
