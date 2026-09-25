@@ -124,14 +124,21 @@ def ping(project: Annotated[str | None, Field(description="工程选择器：名
     return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call("ping", {})
 
 
-def list_level_actors(class_contains: Annotated[str | None, Field(description="按 Actor 类名子串过滤（不区分大小写）")] = None, tag: Annotated[str | None, Field(description="按 Actor tag 过滤")] = None, limit: Annotated[int, Field(description="最多返回的 Actor 数（截断带 truncated 标记）")] = 200, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """List actors in the loaded level (name/class/label/path/location/components). Needs the live bridge."""
+def list_level_actors(class_contains: Annotated[str | None, Field(description="按 Actor 类名子串过滤（不区分大小写）")] = None, tag: Annotated[str | None, Field(description="按 Actor tag 过滤")] = None, limit: Annotated[int, Field(description="最多返回的 Actor 数（截断带 truncated 标记）")] = 200, compose: Annotated[bool, Field(description="true=追加场景构成诊断（按类/子关卡计数 + HISM/ISM 合批机会清单）；大关卡会全量扫描组件，稍慢")] = False, dup_min_count: Annotated[int, Field(description="合批机会阈值：同一网格被 >= 此数的普通 StaticMeshActor 平铺放置")] = 5, composition_cap: Annotated[int, Field(description="构成摘要各组（类/关卡/机会清单）条目上限")] = 30, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """List actors in the loaded level (name/class/label/path/location/components). Needs the live bridge.
+
+    compose=True 时另返 composition：按类/子关卡(streaming)聚合计数、
+    已实例化(ISM/HISM)占比、以及"重复 StaticMesh 未实例化"合批机会清单
+    （mesh + actor 数，降序截断）——drawcall/HISM 优化的决策输入。
+    """
     bus_dir, _pd, err = _resolve(project)
     if err:
         return err
     return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call(
         "list_level_actors",
-        {"class_contains": class_contains, "tag": tag, "limit": limit},
+        {"class_contains": class_contains, "tag": tag, "limit": limit,
+         "compose": bool(compose), "dup_min_count": int(dup_min_count),
+         "composition_cap": int(composition_cap)},
     )
 
 
