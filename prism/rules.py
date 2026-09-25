@@ -232,11 +232,27 @@ def _rule_texture_size(ctx):
             sev, limit = "warn", int(th["warn"])
         else:
             continue
+        # 5.4 真机校准：源尺寸大但运行时已被 MaxSize 限到很小 -> 非显存问题，降 warn
+        est_mb = (m.get("est_runtime_bytes") or 0) / 1048576.0
+        capped_small = bool(m.get("max_size")) and 0 < est_mb <= 1.0
+        if sev == "error" and capped_small:
+            sev, limit = "warn", int(th["warn"])
+        # 运行时证据：常驻内存可能是资源未上传的占位值，以派生估算为准
+        evidence = {"width": px, "height": m.get("height"),
+                    "resident_bytes": m.get("memory_bytes"),
+                    "est_runtime_mb": round(est_mb, 3),
+                    "max_size": m.get("max_size"), "virtual_texture": m.get("virtual_texture")}
+        evidence = {k: v for k, v in evidence.items() if v is not None}
+        if m.get("size_derived"):
+            evidence["size_derived"] = True
+        if capped_small:
+            advice = ("source is large but runtime already capped by MaxSize (est %.2fMB); "
+                      "cost is disk/cook only - consider re-import at target res" % est_mb)
+        else:
+            advice = "downscale, virtualize, or use texture LOD bias"
         out.append({"rule_id": "texture_size", "severity": sev, "subject": pkg,
-                    "evidence": {"width": px, "height": m.get("height"), "memory_bytes": m.get("memory_bytes")},
-                    "threshold": limit, "advice": "downscale, virtualize, or use texture LOD bias"})
+                    "evidence": evidence, "threshold": limit, "advice": advice})
     return out
-
 
 def _rule_mesh_tri(ctx):
     th = ctx["profile"]["mesh_tri"]

@@ -91,12 +91,12 @@ def _measure_texture(unreal, obj, tried):
                 if sx:
                     m = {"width": int(sx), "height": int(sy or sx)}
                     break
-        else:
-            return None
+    if m is None:
+        # 5.4 实证：TextureCube 无任何尺寸 API（前面候选全 miss）；不在此早退，
+        # 继续采 source 内存/标记，由 _derive_texture_geometry 反推边长。
+        m = {}
     for name, call, key in (
         ("blueprint_get_memory_size", lambda: int(obj.blueprint_get_memory_size()), "memory_bytes"),
-        ("blueprint_get_texture_source_disk_and_memory_size",
-         lambda: int(obj.blueprint_get_texture_source_disk_and_memory_size()[0]), "source_disk_bytes"),
         ("prop:max_texture_size", lambda: int(_prop(obj, "max_texture_size")), "max_size"),
     ):
         try:
@@ -106,12 +106,20 @@ def _measure_texture(unreal, obj, tried):
         if v:
             m[key] = v
             tried.append(name)
-    # 压缩格式 / VirtualTexture 标记 / CubeArray 层数：跨版本候选，取不到留缺不崩
+    # 5.4 真机实证：source (disk, memory)=未压缩 RGBA8 总量，不依赖编辑器上传时机；
+    # Cube 无尺寸 API，只能由它反推。
+    try:
+        src_pair = obj.blueprint_get_texture_source_disk_and_memory_size()
+        m["source_disk_bytes"] = int(src_pair[0])
+        m["source_memory_bytes"] = int(src_pair[1])
+        tried.append("blueprint_get_texture_source_disk_and_memory_size")
+    except Exception:
+        pass
     cs = _prop(obj, "compression_settings")
     if cs is not None:
         m["compression"] = str(cs)
         tried.append("prop:compression_settings")
-    for key in ("virtual_texture_supported", "is_virtual"):
+    for key in ("virtual_texture_streaming", "virtual_texture_supported", "is_virtual"):
         v = _prop(obj, key)
         if v is not None:
             m["virtual_texture"] = bool(v)
@@ -128,7 +136,59 @@ def _measure_texture(unreal, obj, tried):
                 m["array_size"] = v
                 tried.append("prop:" + key)
                 break
+    _derive_texture_geometry(obj, m)
+    if not m:
+        return None
     return m
+
+
+SRC_BYTES_PER_TEXEL = 4        # 源=未压缩 RGBA8
+BC_BYTES_PER_TEXEL = 1.0       # 运行时近似：TC_Default(BC1/BC3) 约 1B/px
+MIP_CHAIN_FACTOR = 1.33        # 全 mip 链体积 ~ 1/(1-1/4)
+
+
+def _faces_of(cls_name, array_size):
+    faces = 6 if (cls_name and "Cube" in cls_name) else 1
+    try:
+        n = int(array_size or 1)
+    except (TypeError, ValueError):
+        n = 1
+    return faces * max(n, 1)
+
+
+def _derive_texture_geometry(obj, m):
+    """由 source_memory 反推边长（正度假设），并按 max_size 折算运行时估算。
+
+    5.4 实证：blueprint_get_size_x/y 在资源上传前返回 32x32 占位，而 Cube 根本没有
+    尺寸 API；source_memory_bytes 从载入起就真。估算口径保守（BC 近似），
+    仅用于真大/假大判定与 width 缺失时的兜底，标注 size_derived 供消费方辨别。
+    """
+    cls_name = None
+    try:
+        cls_name = obj.get_class().get_name()
+    except Exception:
+        pass
+    faces = _faces_of(cls_name, m.get("array_size"))
+    side = None
+    src_mem = m.get("source_memory_bytes")
+    if src_mem:
+        try:
+            area = float(src_mem) / (SRC_BYTES_PER_TEXEL * faces)
+            if area > 0:
+                side = int(round(area ** 0.5))
+        except (TypeError, ValueError):
+            side = None
+    if side and (not m.get("width") or int(m.get("width") or 0) <= 64):
+        m["width"], m["height"] = side, side
+        m["size_derived"] = True
+    # 运行时估算：有效边长 = min(源边长, max_size 限幅)；全 mip 链、按面数
+    est_src = side if side else int(m.get("width") or 0)
+    if est_src:
+        cap = int(m.get("max_size") or 0)
+        if cap > 0:
+            est_src = min(est_src, cap)
+        m["est_runtime_bytes"] = int(est_src * est_src * faces
+                                     * BC_BYTES_PER_TEXEL * MIP_CHAIN_FACTOR)
 
 
 def _measure_mesh(unreal, obj, tried):
@@ -221,14 +281,23 @@ def _runtime_verdict(disk_bytes, m):
     """
     if not isinstance(m, dict):
         return {"verdict": "unknown", "reason": "no_metrics"}
-    mem = m.get("memory_bytes")
+    # 5.4 真机校准：常驻内存(blueprint_get_memory_size)在编辑器里可能是未上传/半流送的
+    # 占位小值；改用 max(实测, 属性估算 est_runtime_bytes) 作运行时规模，两者都有则并列。
     try:
-        mem = float(mem) if mem is not None else None
+        mem = float(m.get("memory_bytes") or 0)
     except (TypeError, ValueError):
-        mem = None
-    if mem is not None:
-        mem_mb = mem / 1048576.0
-        out = {"runtime_mb": round(mem_mb, 3)}
+        mem = 0.0
+    try:
+        est = float(m.get("est_runtime_bytes") or 0)
+    except (TypeError, ValueError):
+        est = 0.0
+    runtime = max(mem, est)
+    if runtime > 0:
+        mem_mb = runtime / 1048576.0
+        out = {"runtime_mb": round(mem_mb, 3),
+               "runtime_basis": ("derived_estimate" if est >= mem else "resident_memory")}
+        if mem and est:
+            out["resident_mb"] = round(mem / 1048576.0, 3)
         if mem_mb >= RUNTIME_HEAVY_MEM_MB:
             out["verdict"] = "runtime_heavy"
             return out
@@ -378,7 +447,8 @@ def probe_asset_api(asset_path):
     obj = _load_object(unreal, object_path)
     if obj is None:
         return {"note": "load_failed", "query": object_path}
-    keys = ("size", "surface", "lod", "mip", "collision", "material")
+    keys = ("size", "surface", "lod", "mip", "collision", "material",
+            "stream", "format", "memory", "source")
     names = [n for n in dir(obj) if any(k in n.lower() for k in keys)]
     feedback = []
     for n in sorted(names)[:40]:
