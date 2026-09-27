@@ -1,4 +1,4 @@
-"""v0.3 性能规则引擎（server 侧；docs/DESIGN_v0.3.md）。
+"""v0.3 性能规则引擎（server 侧；DESIGN_v0.3.md）。
 
 铁律落位：本模块在 server 进程运行（Python>=3.10：3.11+ 用 tomllib，3.10 用 tomli 兜底），离线规则只读磁盘与任务档案；
 bridge 通道规则经总线批量取数（describe_many/get_asset_metrics/list_level_actors），

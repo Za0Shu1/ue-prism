@@ -4,7 +4,7 @@
 - `prism setup --client ...`     把「全局、零工程路径」的 MCP 注册项写进客户端配置（幂等）。
 - `prism setup --uninstall ...`  从客户端配置移除该项。
 
-设计（docs/DESIGN_v1.0.md §4）：Codex ~/.codex/config.toml、opencode ~/.config/opencode/opencode.jsonc、
+设计（DESIGN_v1.0.md §4）：Codex ~/.codex/config.toml、opencode ~/.config/opencode/opencode.jsonc、
 Cursor ~/.cursor/mcp.json。一律原子替换、不覆盖用户其它条目；无法安全解析的配置退回「打印待粘贴块」而不强改。
 """
 from __future__ import annotations

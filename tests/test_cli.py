@@ -1,6 +1,6 @@
 """`prism setup` 安装器测试（无引擎）：toml/json 合并、幂等、卸载、保留用户条目。
 
-对应 docs/DESIGN_v1.0.md §4。纯标准库 + tmp_path，不碰真实用户配置。
+对应 DESIGN_v1.0.md §4。纯标准库 + tmp_path，不碰真实用户配置。
 """
 from __future__ import annotations
 

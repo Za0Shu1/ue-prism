@@ -1,4 +1,4 @@
-"""v0.2 UAT 定位与 cook/package 提交（server 侧；PR-2，见 docs/DESIGN_v0.2.md）。
+"""v0.2 UAT 定位与 cook/package 提交（server 侧；PR-2，见 DESIGN_v0.2.md）。
 
 - 引擎根定位：env PRISM_ENGINE_ROOT 优先（源码版/Rocket 版没有注册表项）；
   否则 .uproject→EngineAssociation→注册表（HKLM EpicGames / WOW6432Node / HKCU Builds）。
