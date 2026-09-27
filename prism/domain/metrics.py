@@ -178,9 +178,16 @@ def _derive_texture_geometry(obj, m):
                 side = int(round(area ** 0.5))
         except (TypeError, ValueError):
             side = None
-    if side and (not m.get("width") or int(m.get("width") or 0) <= 64):
-        m["width"], m["height"] = side, side
-        m["size_derived"] = True
+    if side:
+        m["source_width"] = side
+        cur = int(m.get("width") or 0)
+        if not cur or cur <= 64:
+            # 冷态直读是占位值(<=64)：width 用源反推兜底
+            m["width"], m["height"] = side, side
+            m["size_derived"] = True
+        elif cur != side:
+            # 热态直读是 MaxSize/限幅后的有效尺寸（与源尺寸不同）
+            m["effective_width"] = cur
     # 运行时估算：有效边长 = min(源边长, max_size 限幅)；全 mip 链、按面数
     est_src = side if side else int(m.get("width") or 0)
     if est_src:

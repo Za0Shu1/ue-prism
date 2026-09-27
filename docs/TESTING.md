@@ -1,0 +1,65 @@
+# 测试规范（ue-prism）
+
+> 面向开发者与 AI agent：每层怎么跑、测什么、当前覆盖到什么程度。
+> 原则（AGENTS.md）：默认只读；写操作双钥；错误绝不伪装成 ok；列表带 total/truncated/cap。
+
+## 四层测试体系
+
+| 层 | 依赖 | 命令 | 说明 |
+|---|---|---|---|
+| **L0 离线套件** | 无引擎，Python>=3.10 | `python -m pytest` | 协议/信封/总线/规则纯逻辑/降级结构契约。改任何层必跑 |
+| **L1 桥冒烟** | 编辑器在线 | `python scripts/verify_connection.py`；`python scripts/bus_call.py <bus_dir> ping` | 心跳、往返、UE 版本 |
+| **L2 校准夹具** | 任意 UE5 工程装好桥插件 | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 11 项校验（见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
+| **L3 真实工程抽样** | 大工程（如 客户工程） | 人工驱动 MCP 工具 + 抽检 | 假阳性率、大闭包耗时、阈值手感 |
+
+## L2 校准夹具：资产真值表
+
+夹具全部由代码生成（无二进制入库），落在目标工程 `/Game/PrismCalib/`，只新增、不动既有内容：
+
+| 靶资产 | 真值 | 校验点 |
+|---|---|---|
+| `T_BigNoise` | 4096^2 源，无限幅 | `runtime_verdict=runtime_heavy`（~21MB 估算），`texture_size` 保持 error |
+| `T_FakeBig` | 同 4K 源，MaxSize=128 | `disk_only_bloat` + `capped_by_max_size`；`asset_size_top` 证据链带双证据降档 |
+| `T_CalibCube` | 引擎 TextureCube 副本 | Cube 尺寸可由源内存反推（`source_width>0`；5.4 实证无任何尺寸 API 时的兜底路径） |
+| `T_Orphan1..3`、`T_Used1K` | 无引用 | `scan_orphan_assets` 全命中；`CalibMap` 作为 level_root 被正确排除 |
+| `CalibMap` | 1500 个平铺 SM_Cube（`PRISM_FIXTURE_ACTORS` 可调） | compose 聚合 world>=1400；`/Engine/BasicShapes/Cube x1500` 进合批机会清单 |
+
+执行细节（5.4 真机实证，跨版本脚本已内置兜底）：
+- **commandlet 只能做资产**（import/duplicate 贴图）；`new_level`、关卡编辑、TextureCube 复制在
+  `-run=pythonscript` 下会崩，必须走 GUI 编辑器 StartupScripts（run_fixture 自动注入并还原 ini）。
+- 编辑器刚载入的纹理，`blueprint_get_size_x`/`memory_size` 可能是 **32x32/4KB 占位**（资源未上传，
+  bus 在主线程 tick 内处理、sleep 无效）；热态直读又可能是 **MaxSize 限幅后的有效尺寸**。
+  因此度量层固定三分口径：`width`（现状）、`source_width`（源反推，规则判据）、`effective_width`（限幅后）。
+
+## 工具覆盖矩阵（当前 20 个 MCP 工具）
+
+| 工具 | L0 离线用例 | L2 夹具 checks | 仍欠（L3 真实工程） |
+|---|---|---|---|
+| `ping` | test_bus | ping.bridge_alive | - |
+| `list_projects` / `list_perf_rules` | test_registry / test_rules | -（随 report 间接） | - |
+| `describe_asset` / `get_asset_references` | test_assets / test_pr05_contract | 经 metrics/report 间接 | 大引用面性能 |
+| `get_asset_chain`（环/god/影响半径） | test_assets(+SCC 纯逻辑) / test_buscall | -（小图 smoke） | 客户工程 大闭包耗时、god_min_refs 阈值手感 |
+| `scan_orphan_assets` | test_orphan_degrade | orphan.targets_found / map_not_orphaned | 真实工程假阳性抽检 >=20 条 |
+| `get_asset_metrics`（真大/假大） | test_metrics_degrade / test_metrics_runtime | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat | 真实美术资产压缩格式下 est 口径偏差 |
+| `list_level_actors`（compose） | test_actors_compose | compose.world_ge_1400 / cube_batching_opportunity | 真实 WP 关卡全载成本 |
+| `read_editor_log` / `attribute_cook_errors` | test_logscan / test_attribute | - | 与真实 cook 日志联动的归因抽检 |
+| `scan_folder_assets` | test_folderscan | -（report 间接） | - |
+| `get_perf_report`（7 规则+降档） | test_rules / test_rules_runtime | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded | 大工程 top-80 抽样代表性 |
+| `cook_package` / `get_cook_status` | test_cook / test_tasks | -（cook 需真工程，不在夹具内） | 真 cook 全链路（已有 9/22 档案佐证） |
+| `preview_asset_migration` | test_migration_preview | - | - |
+| `migrate_asset_rename` / `_move` / `_asset`（写） | test_migrate（双钥/dry_run/回滚） | - | 版本管理下的真实改名抽验 |
+| 基建（bus/envelope/cli/pluginpack/resolve） | test_bus / test_buscall / test_cli / test_pluginpack / test_resolve | - | - |
+
+## 新功能测试纪律
+
+1. 新 domain 函数：必须带无引擎降级用例（结构键常驻），命名前缀 `get_/list_/scan_/describe_/read_`。
+2. 新写操作：默认 dry_run + 双钥用例 + 回滚路径用例（范式见 test_migrate.py）。
+3. 触碰 unreal 真机 API 路径：给夹具加一个已知真值靶（能反推的先反推），并在本文档真值表登记。
+4. 规则改动：test_rules*.py 用例必更新；报告字段变更需带 `total/truncated/cap` 断言。
+5. 提交前 `python -m pytest` 全绿；跨版本改动在 L2 各引擎版本各跑一次并归档 matrix.json。
+
+## 已知限制
+
+- 夹具不测渲染性能（无材质/光照变体），它校准的是**工具判定逻辑与 API 命中率**。
+- `probe_asset_api` 是校准辅助工具（未列入对外承诺），随夹具排障使用。
+- 跨版本资产拷贝**只向后兼容**（旧版引擎打不开新序列化）——这正是夹具选择"代码现场生成"而非入库二进制的原因。

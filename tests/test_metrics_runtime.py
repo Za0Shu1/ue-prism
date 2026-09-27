@@ -103,3 +103,13 @@ def test_derive_respects_max_size_cap():
     M._derive_texture_geometry(_FakeTex("Texture2D"), m)
     assert m["width"] == 4096  # 边长仍是源尺寸
     assert m["est_runtime_bytes"] == int(128 * 128 * 1.33)  # 估算按限幅后
+
+def test_warm_state_keeps_effective_and_source_widths():
+    # 热态直读=MaxSize 限幅后的有效尺寸 128；源反推 4096 记入 source_width（规则判据）
+    m = {"width": 128, "height": 128, "max_size": 128,
+         "source_memory_bytes": 4096 * 4096 * 4}
+    M._derive_texture_geometry(_FakeTex("Texture2D"), m)
+    assert m["source_width"] == 4096
+    assert m["effective_width"] == 128
+    assert m["width"] == 128 and "size_derived" not in m
+    assert m["est_runtime_bytes"] == int(128 * 128 * 1.33)

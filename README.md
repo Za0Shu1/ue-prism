@@ -51,7 +51,7 @@ agent ⇄ stdio ⇄ **prism server**（纯 Python，不碰引擎）⇄ **文件�
 
 ## 文档
 
-安装与使用见 [docs/SETUP.md](docs/SETUP.md)。
+安装与使用见 [docs/SETUP.md](docs/SETUP.md)；测试体系与各功能覆盖矩阵见 [docs/TESTING.md](docs/TESTING.md)。
 
 ## License
 
