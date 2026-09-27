@@ -10,7 +10,7 @@
 | **L0 离线套件** | 无引擎，Python>=3.10 | `python -m pytest` | 协议/信封/总线/规则纯逻辑/降级结构契约。改任何层必跑 |
 | **L1 桥冒烟** | 编辑器在线 | `python scripts/verify_connection.py`；`python scripts/bus_call.py <bus_dir> ping` | 心跳、往返、UE 版本 |
 | **L2 校准夹具** | 任意 UE5 工程装好桥插件 | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 11 项校验（见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
-| **L3 真实工程抽样** | 大工程（如 客户工程） | 人工驱动 MCP 工具 + 抽检 | 假阳性率、大闭包耗时、阈值手感 |
+| **L3 真实工程抽样** | 客户的真实大工程 | 人工驱动 MCP 工具 + 抽检 | 假阳性率、大闭包耗时、阈值手感 |
 
 ## L2 校准夹具：资产真值表
 
@@ -38,7 +38,7 @@
 | `ping` | test_bus | ping.bridge_alive | - |
 | `list_projects` / `list_perf_rules` | test_registry / test_rules | -（随 report 间接） | - |
 | `describe_asset` / `get_asset_references` | test_assets / test_pr05_contract | 经 metrics/report 间接 | 大引用面性能 |
-| `get_asset_chain`（环/god/影响半径） | test_assets(+SCC 纯逻辑) / test_buscall | -（小图 smoke） | 客户工程 大闭包耗时、god_min_refs 阈值手感 |
+| `get_asset_chain`（环/god/影响半径） | test_assets(+SCC 纯逻辑) / test_buscall | -（小图 smoke） | 真实大工程的大闭包耗时、god_min_refs 阈值手感 |
 | `scan_orphan_assets` | test_orphan_degrade | orphan.targets_found / map_not_orphaned | 真实工程假阳性抽检 >=20 条 |
 | `get_asset_metrics`（真大/假大） | test_metrics_degrade / test_metrics_runtime | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat | 真实美术资产压缩格式下 est 口径偏差 |
 | `list_level_actors`（compose） | test_actors_compose | compose.world_ge_1400 / cube_batching_opportunity | 真实 WP 关卡全载成本 |
@@ -51,6 +51,8 @@
 | 基建（bus/envelope/cli/pluginpack/resolve） | test_bus / test_buscall / test_cli / test_pluginpack / test_resolve | - | - |
 
 ## 新功能测试纪律
+
+0. **公开仓库纪律**：入库文件（`docs/`、`README`、代码注释）不得出现客户工程名、真实机器路径、内部设计稿内容；逐日排障/手动测试记录一律放 `_internal/`（已 gitignore），不随仓库分发。
 
 1. 新 domain 函数：必须带无引擎降级用例（结构键常驻），命名前缀 `get_/list_/scan_/describe_/read_`。
 2. 新写操作：默认 dry_run + 双钥用例 + 回滚路径用例（范式见 test_migrate.py）。
