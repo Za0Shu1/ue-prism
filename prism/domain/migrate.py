@@ -21,6 +21,20 @@ def _no_engine(op, old, new):
     })
 
 
+def _all_missing(tried):
+    """tried 里全部是 AttributeMissing -> 该引擎版本根本没有这些 API。"""
+    return bool(tried) and all(t.get("err") == "AttributeMissing" for t in tried)
+
+
+def _try_op_named(E, attr, candidates):
+    """按属性名取函数（缺失不裸崩，记入 tried）；语义同 _try_op。"""
+    fn = getattr(E, attr, None)
+    if fn is None:
+        return False, None, [{"sig": "unreal.EditorAssetLibrary." + attr,
+                              "err": "AttributeMissing"}]
+    return _try_op(fn, candidates)
+
+
 def _try_op(fn, candidates):
     """逐个尝试 (args_tuple, sig)；返回 (是否成功, 命中签名, tried证据)。"""
     tried = []
@@ -117,8 +131,11 @@ def migrate_asset_rename(asset_path, new_name, confirm=False, fixup_redirectors=
         ((object_path, new_object), "rename_asset(obj,obj)"),
         ((package, new_object), "rename_asset(pkg,obj)"),
     ]
-    ok, sig, tried = _try_op(E.rename_asset, candidates)
+    ok, sig, tried = _try_op_named(E, "rename_asset", candidates)
     if not ok:
+        if _all_missing(tried):
+            return envelope.make_err(envelope.Code.UE_API_MISMATCH,
+                                     "rename_asset unavailable on this engine build; tried=%s" % tried)
         return envelope.make_ok({
             "op": "rename", "old": package, "new": new_package,
             "executed": True, "success": False, "tried": tried,
@@ -163,15 +180,33 @@ def migrate_asset_move(asset_path, dest_path, new_name=None, confirm=False, fixu
         ((package, new_package), "move_asset(package,package)"),
         ((package, new_object), "move_asset(package,object)"),
     ]
-    ok, sig, tried = _try_op(E.move_asset, candidates)
+    ok, sig, tried = _try_op_named(E, "move_asset", candidates)
+    via_rename = False
     if not ok:
+        # 5.4 真机实证：EditorAssetLibrary 没有 move_asset；rename_asset 传
+        # 完整目标包路径即等价移动（Content Browser 的 move 同走 rename 路径）。
+        cands2 = [
+            ((object_path, new_package), "rename_asset->move(object,package)"),
+            ((package, new_package), "rename_asset->move(package,package)"),
+        ]
+        ok2, sig2, tried2 = _try_op_named(E, "rename_asset", cands2)
+        tried = tried + tried2
+        if ok2:
+            ok, sig, via_rename = True, sig2, True
+    if not ok:
+        if _all_missing(tried):
+            return envelope.make_err(envelope.Code.UE_API_MISMATCH,
+                                     "neither move_asset nor rename_asset available on this engine build; tried=%s" % tried)
         return envelope.make_ok({
             "op": "move", "old": object_path, "new": new_object,
             "executed": True, "success": False, "tried": tried,
             "note": "所有候选签名均未返回 True；资产可能未移动。见 tried 证据。",
         })
     fixup = _fixup_redirectors(unreal, package, leaf) if fixup_redirectors else None
-    note = "移动成功（UE 已改引用，内存态）；"
+    note = "移动成功（UE 已改引用，内存态"
+    if via_rename:
+        note += "，经 rename_asset 全路径实现：本引擎无 move_asset"
+    note += "）；"
     if fixup is not None:
         note += "重定向桩清理%s。" % ("已确认" if fixup.get("ok") else "未确认(见 redirectors)")
     else:
