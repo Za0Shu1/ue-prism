@@ -2,6 +2,8 @@
 
 - 零 socket、零第三方依赖，仅标准库；
 - 命令 cmd_<id>.json -> 响应 res_<id>.json，均原子写（tmp + os.replace）；
+- 处理前先 claim（cmd_ -> proc_ 原子改名，赢者独占）：写命令 at-most-once，
+  重启/并发场景绝不重放（proc_ 残骸只会被 sweep 掉，永不执行）；
 - 唯一 id 使多客户端天然互不串台；
 - 超时报 BRIDGE_TIMEOUT，不挂起；
 - 活性标记 heartbeat.json（bridge 限频写、只含时间戳，见 REQUIREMENTS §7.2 语义限定）：
@@ -21,6 +23,7 @@ from . import envelope
 DEFAULT_TIMEOUT = float(os.environ.get("PRISM_TIMEOUT", "30"))
 CMD_PREFIX = "cmd_"
 RES_PREFIX = "res_"
+PROC_PREFIX = "proc_"
 _SUFFIX = ".json"
 
 
@@ -76,7 +79,8 @@ def heartbeat_age(bus_dir):
 def sweep_stale(bus_dir, older_than):
     """清扫 mtime 老于 older_than 秒的 cmd/res/tmp 残留（崩溃/超时遗骸），防目录膨胀。"""
     cutoff = time.time() - older_than
-    patterns = (CMD_PREFIX + "*" + _SUFFIX, RES_PREFIX + "*" + _SUFFIX, "*.tmp")
+    patterns = (CMD_PREFIX + "*" + _SUFFIX, RES_PREFIX + "*" + _SUFFIX,
+                PROC_PREFIX + "*" + _SUFFIX, "*.tmp")
     for pat in patterns:
         for p in glob.glob(os.path.join(bus_dir, pat)):
             try:
@@ -141,15 +145,27 @@ def serve_once(bus_dir, handler):
             continue
         base = os.path.basename(cmd_path)
         cid = base[len(CMD_PREFIX):-len(_SUFFIX)]
+        # claim：原子改名 cmd_ -> proc_。多实例/重入只有赢者拿到，写命令绝不双跑；
+        # proc_ 残骸（崩溃遗留）只会被 sweep_stale 清掉，永不被重新执行。
+        claim_path = os.path.join(bus_dir, PROC_PREFIX + cid + _SUFFIX)
         try:
-            with open(cmd_path, "r", encoding="utf-8") as f:
+            os.rename(cmd_path, claim_path)
+        except OSError:
+            continue  # 被别的处理者 claim 走/已消失
+        try:
+            with open(claim_path, "r", encoding="utf-8") as f:
                 req = json.load(f)
         except (OSError, ValueError):
-            continue  # 半截/坏 json：本轮跳过，等下一次
-        env = handler(req.get("fn"), req.get("args") or {})
+            _silently_remove(claim_path)
+            continue  # 半截/坏 json：认栽删除，不重放
+        try:
+            env = handler(req.get("fn"), req.get("args") or {})
+        except Exception as e:
+            env = envelope.make_err(envelope.Code.RUNTIME_ERROR,
+                                    "handler crash: %s" % e)
         res_path = os.path.join(bus_dir, RES_PREFIX + cid + _SUFFIX)
         _atomic_write_json(res_path, env)
-        _silently_remove(cmd_path)
+        _silently_remove(claim_path)
         return True
     return False
 
