@@ -223,7 +223,8 @@ def _rule_texture_size(ctx):
     out = []
     for pkg, it in sorted(_ensure_metrics(ctx).items()):
         m = it.get("metrics") or {}
-        px = int(m.get("width") or 0)
+        # 按"源尺寸"判（编辑器冷热态下 width 直读可能是占位或限幅后有效值）
+        px = int(m.get("source_width") or m.get("width") or 0)
         if px <= 0:
             continue
         if px >= int(th["error"]):
@@ -245,6 +246,8 @@ def _rule_texture_size(ctx):
         evidence = {k: v for k, v in evidence.items() if v is not None}
         if m.get("size_derived"):
             evidence["size_derived"] = True
+        if m.get("effective_width"):
+            evidence["effective_width"] = m["effective_width"]
         if capped_small:
             advice = ("source is large but runtime already capped by MaxSize (est %.2fMB); "
                       "cost is disk/cook only - consider re-import at target res" % est_mb)
