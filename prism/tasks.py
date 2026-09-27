@@ -1,4 +1,4 @@
-"""v0.2 server 侧任务登记表（docs/DESIGN_v0.2.md §2 的实现，PR-1）。
+"""v0.2 server 侧任务登记表（DESIGN_v0.2.md §2 的实现，PR-1）。
 
 长任务（cook/package）远超 30s 总线超时 → 落盘跟踪。关键契约：
 **没有守护进程，也没有后台轮询** —— server 是被 agent spawn 的短命进程；

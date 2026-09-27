@@ -1,6 +1,6 @@
 # AGENTS.md — ue-prism 仓库工作约定
 
-面向在此仓库工作的 AI agent。动手前先读 `README.md` 与 `docs/ARCHITECTURE.md`。
+面向在此仓库工作的 AI agent。动手前先读 `README.md`、`docs/SETUP.md`（安装使用）与 `docs/TESTING.md`（测试体系与覆盖矩阵）。
 
 ## 三层架构与依赖铁律
 - `prism/server.py`（协议层）：可 import `mcp`；**绝不 import `unreal`**。把 MCP 调用转成总线请求。
@@ -26,17 +26,29 @@
 - 生产轮询挂在 **UE 主线程 slate post-tick**（`bridge.start`）；UE 5.6+ 禁止在非 game thread 调 `unreal`，**不要改成后台线程**。每 tick 只处理一条命令（`serve_once`），控制帧内开销。
 - 无引擎的总线测试才用 `bus.run_forever`（线程）。
 
-## 测试
-- 无引擎：`python -m pytest`（`tests/test_bus.py` 覆盖 ping 往返 / `UNKNOWN_FN` / `BRIDGE_TIMEOUT`）。改动总线、信封、domain 分发后必须跑。
-- 真机：UE 5.x 启用 Python Editor Scripting，按 README 快速开始手动验 `ping`。
+## 测试（规范全文见 docs/TESTING.md）
+四层体系，按需执行：
+- **L0 离线**：`python -m pytest`（21 个文件 / 178 用例：总线、信封、domain 分发、规则纯逻辑、降级结构契约）。改动上述任何一层后必须跑。
+- **L1 桥冒烟**：编辑器在线时 `python scripts/verify_connection.py` 或 `scripts/bus_call.py <bus_dir> ping`。
+- **L2 校准夹具**：`python scripts/calib_fixture/run_fixture.py --project <工程> --editor <UnrealEditor.exe>` 一键在任意 UE5 工程/版本重建已知真值（真大/假大/Cube/孤儿/合批靶）并跑 11 项真值校验，落 `matrix.json`（ue_version / API tried 命中 / 计时）——跨版本各跑一次即得兼容矩阵。
+- **L3 真实工程抽检**：大工程（用户提供）验证假阳性率、大闭包耗时、阈值手感。
 - 不要为了让测试通过而删除 domain 里的 `unreal` 分支——无引擎时靠惰性 import 降级返回。
+- domain 内 sleep/轮询等待编辑器状态**无效**（总线在主线程 tick 内同步处理）；冷热态敏感的度量要固化字段语义（如 `source_width`/`effective_width`），不随编辑器状态漂移。
+
+## 测试随功能走（强制）
+- **每个工具/功能必须自带测试用例与测试方案**，作为提交的一部分：新 domain 函数 → 无引擎降级用例（结构键常驻）；新写操作 → 双钥/dry_run/回滚用例；新规则 → 纯逻辑用例 + 报告纪律断言（`total/truncated/cap`）。
+- **真机 API 路径必须进夹具**：给 `scripts/calib_fixture/` 加已知真值靶，并在 `docs/TESTING.md` 的资产真值表与工具覆盖矩阵登记；让用户自己准备测试用例/测试数据 = 缺陷。
+- 提交/合并前：L0 全绿；改动触碰 unreal 真机路径 → 至少一个引擎版本 L2 全 PASS。
 
 ## 依赖与打包
 - `pyproject.toml` 锁 `mcp>=2,<3`。改 `server.py` 前核对所 pin 版本的 MCP SDK 导入路径与 tool 注册 API。
 - 安装：`pip install -e .`（dev）；server 侧无引擎依赖。
 
 ## 文档语言
-README/文档中文主体，代码/命令/标识符保留英文。
+
+- 代码注释里的 `DESIGN_vX.Y §Z` 是内部设计稿编号，故意不入库；引用时**不带** `docs/` 前缀（仓库内只有 SETUP/TESTING 两篇）。
+
+- README/文档中文主体，代码/命令/标识符保留英文。
 
 ## 非目标
 不做视觉/审美迭代、深度蓝图图编辑、C++ 生成/编译回路。
