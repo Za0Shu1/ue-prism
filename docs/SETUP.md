@@ -50,5 +50,6 @@ prism setup --client codex        # codex / opencode / cursor / claude / claude-
 - **`BRIDGE_UNREACHABLE`**：编辑器已关或主线程长时间卡住（大编译/模态框）；恢复后重试。
 - **`AMBIGUOUS_PROJECT`**：多个活跃工程未点名，调用时加 `project=`。
 - **想钉死默认工程**：给 server 传 `--project-dir` 或设 `PRISM_PROJECT_DIR`；显式 `project=` 仍可覆盖。
+- **升级后行为没变**（如 `get_asset_metrics` 缺 `runtime_verdict`/`disk_bytes` 等新字段）：编辑器里的桥加载的是工程内 `Plugins/UEPrism/Content/Python/prism/` 那份**安装时定格的拷贝**，不读 pip 包——`pip install -e .` 或重装 server 都刷不到它，单重启编辑器也没用。改了源码后须重跑 `prism plugin-install --project <P> --yes --force` 覆盖拷贝（顺带删其下 `__pycache__`），**再重启编辑器**；用 `ping` 心跳 + 新字段重新出现确认已换版。
 
 > cook / 迁移改名等**写操作**默认 dry-run 预览，需显式确认才落盘。完整安装细节、cook 双钥、跨版本与发布见仓库开发文档。
