@@ -70,3 +70,27 @@ def test_texture_size_capped_4k_downgraded_and_real_4k_stays():
     assert fake["evidence"]["resident_bytes"] == 4096
     assert "capped by MaxSize" in fake["advice"]
     assert "est_runtime_mb" in real["evidence"]
+
+
+# ---- D2: mesh 材质槽维度流进报告（5.4 校准：从 sections 派生 material_slots）----
+
+def test_mesh_tri_evidence_carries_material_slots():
+    ctx = {"profile": rules.PROFILES["pc"],
+           "metrics": {"/Game/M/High": {"metrics": {
+               "lods": [{"index": 0, "triangles": 2500000, "sections": 9}],
+               "lod_count": 1, "material_slots": 9}}}}
+    f = rules._rule_mesh_tri(ctx)
+    assert len(f) == 1
+    assert f[0]["evidence"]["material_slots"] == 9
+    assert f[0]["evidence"]["triangles_lod0"] == 2500000
+    assert "material slots" in f[0]["advice"]     # 9 >= mat_slots_warn(8) -> 追加建议
+
+
+def test_mesh_tri_low_material_slots_no_advice():
+    ctx = {"profile": rules.PROFILES["pc"],
+           "metrics": {"/Game/M/Ok": {"metrics": {
+               "lods": [{"index": 0, "triangles": 300000, "sections": 2}],
+               "lod_count": 3, "material_slots": 2}}}}
+    f = rules._rule_mesh_tri(ctx)
+    assert len(f) == 1 and f[0]["evidence"]["material_slots"] == 2
+    assert "material slots" not in f[0]["advice"]

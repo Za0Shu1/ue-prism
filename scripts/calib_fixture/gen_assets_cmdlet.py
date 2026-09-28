@@ -72,6 +72,16 @@ def main():
         return "T_FakeBig max_texture_size=128"
 
     step("fake_big", fake_big)
+
+    def calib_mesh():
+        dest = FOLDER + "/CalibMesh"
+        if EAL.does_asset_exist(dest):
+            EAL.delete_asset(dest)
+        if EAL.duplicate_asset("/Engine/BasicShapes/Cube", dest) is None:
+            raise RuntimeError("duplicate engine cube failed")
+        EAL.save_asset(dest)
+        return "CalibMesh (engine cube copy; known 1 material slot)"
+    step("calib_mesh", calib_mesh)
     out["assets"] = sorted(str(d.package_name) for d in
                            (unreal.AssetRegistryHelpers.get_asset_registry()
                             .get_assets_by_path(unreal.Name(FOLDER), True) or []))

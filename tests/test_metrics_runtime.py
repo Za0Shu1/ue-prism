@@ -113,3 +113,12 @@ def test_warm_state_keeps_effective_and_source_widths():
     assert m["effective_width"] == 128
     assert m["width"] == 128 and "size_derived" not in m
     assert m["est_runtime_bytes"] == int(128 * 128 * 1.33)
+
+
+def test_material_slots_from_lods_pure():
+    assert M._material_slots_from_lods([{"index": 0, "sections": 7}]) == 7
+    assert M._material_slots_from_lods([{"index": 0, "sections": 3},
+                                        {"index": 1, "sections": 5}]) == 5   # 跨 LOD 取最大
+    assert M._material_slots_from_lods([{"index": 0}]) is None                # 无 sections
+    assert M._material_slots_from_lods([]) is None
+    assert M._material_slots_from_lods(None) is None

@@ -24,22 +24,23 @@ from . import attributelog, bus, folderscan, tasks
 PROFILES = {
     "pc": {"asset_size_mb": {"warn": 20.0, "error": 100.0},
            "texture_px": {"warn": 2048, "error": 4096},
-           "mesh_tri": {"warn": 200000, "error": 1000000},
+           "mesh_tri": {"warn": 200000, "error": 1000000, "mat_slots_warn": 8},
            "wps_external_actors": {"warn": 300, "error": 1000},
            "scene_light_dup": {"max_dup": 1}},
     "console": {"asset_size_mb": {"warn": 10.0, "error": 50.0},
                 "texture_px": {"warn": 2048, "error": 4096},
-                "mesh_tri": {"warn": 150000, "error": 500000},
+                "mesh_tri": {"warn": 150000, "error": 500000, "mat_slots_warn": 4},
                 "wps_external_actors": {"warn": 300, "error": 1000},
                 "scene_light_dup": {"max_dup": 1}},
     "mobile": {"asset_size_mb": {"warn": 5.0, "error": 20.0},
                "texture_px": {"warn": 1024, "error": 2048},
-               "mesh_tri": {"warn": 50000, "error": 150000},
+               "mesh_tri": {"warn": 50000, "error": 150000, "mat_slots_warn": 4},
                "wps_external_actors": {"warn": 200, "error": 600},
                "scene_light_dup": {"max_dup": 1}},
 }
 DEFAULT_CAP = 50
 DEFAULT_RECENT_TASKS = 3
+DEFAULT_SAMPLE = 80
 METRIC_CLASSES = {"Texture2D", "TextureCube", "VirtualTexture2D", "StaticMesh"}
 
 # 真机校准发现：cook succeeded 但依赖缺失仅报 Warning 并静默丢弃（DESIGN_v0.2 PR-4 ③）
@@ -82,17 +83,30 @@ def _bridge_status(bus_dir):
 
 def _ensure_scan(ctx):
     if "scan" not in ctx:
-        ctx["scan"] = folderscan.scan_folder_assets(ctx["project_dir"], folder=ctx["scope"], limit=2000)
+        ss = ctx.get("sample_size")
+        limit = 2000
+        if isinstance(ss, int) and ss > limit:
+            limit = ss
+        ctx["scan"] = folderscan.scan_folder_assets(ctx["project_dir"], folder=ctx["scope"], limit=limit)
     return ctx["scan"]
+
+
+def _sample_assets(assets, sample_size):
+    """bridge 规则候选：按 size 降序取前 sample_size 个大资产；sample_size<=0 表示全量（取扫描宇宙）。"""
+    try:
+        n = int(sample_size)
+    except (TypeError, ValueError):
+        n = DEFAULT_SAMPLE
+    return list(assets) if n <= 0 else list(assets)[:n]
 
 
 def _ensure_classes(ctx):
     if "classes" not in ctx:
         classes = {}
         scan = _ensure_scan(ctx)
-        cands = [a["asset_path"] for a in scan["assets"][:80]]
+        cands = [a["asset_path"] for a in _sample_assets(scan["assets"], ctx.get("sample_size", DEFAULT_SAMPLE))]
         if cands:
-            d = bus.BusClient(ctx["bus_dir"], timeout=60).call("describe_many", {"paths": cands, "limit": 80})
+            d = bus.BusClient(ctx["bus_dir"], timeout=60).call("describe_many", {"paths": cands, "limit": len(cands)})
             if d.get("ok"):
                 for it in d["result"]["items"]:
                     pkg = it.get("package_name") or it.get("query")
@@ -275,9 +289,15 @@ def _rule_mesh_tri(ctx):
         else:
             continue
         evidence = {"triangles_lod0": top, "lod_count": m.get("lod_count")}
+        if m.get("material_slots"):
+            evidence["material_slots"] = int(m["material_slots"])
+        if m.get("collision_triangles"):
+            evidence["collision_triangles"] = int(m["collision_triangles"])
         advice = "reduce complexity / add LODs"
         if (m.get("lod_count") or 0) <= 1:
             advice = "single-LOD high-poly mesh: author LODs first"
+        if m.get("material_slots") and int(m["material_slots"]) >= int(th.get("mat_slots_warn", 8)):
+            advice += " (many material slots split draw calls)"
         out.append({"rule_id": "mesh_tri", "severity": sev, "subject": pkg,
                     "evidence": evidence, "threshold": limit, "advice": advice})
     return out
@@ -389,14 +409,14 @@ RULES = (
     {"id": "cook_drop", "cfg": None, "channel": "offline", "doc": "cook succeeded 但日志含静默丢弃依赖告警（校准发现③）", "run": _rule_cook_drop},
     {"id": "cook_empty_maps", "cfg": None, "channel": "offline", "doc": "请求的 map 从未被 cook / 0 包空 cook（校准发现②）", "run": _rule_cook_empty_maps},
     {"id": "wps_external_actors", "cfg": "wps_external_actors", "channel": "offline", "doc": "WP 外部 actor 包数量超阈值（真机案例 148 包）", "run": _rule_wps_external_actors},
-    {"id": "texture_size", "cfg": "texture_px", "channel": "bridge", "doc": "纹理尺寸超阈值（top-80 大资产抽样度量）", "run": _rule_texture_size},
-    {"id": "mesh_tri", "cfg": "mesh_tri", "channel": "bridge", "doc": "网格 LOD0 三角数超阈值/单 LOD 高模", "run": _rule_mesh_tri},
+    {"id": "texture_size", "cfg": "texture_px", "channel": "bridge", "doc": "纹理尺寸超阈值（按 sample_size 抽样度量最大资产）", "run": _rule_texture_size},
+    {"id": "mesh_tri", "cfg": "mesh_tri", "channel": "bridge", "doc": "网格 LOD0 三角数超阈值/单 LOD 高模（附材质槽/碰撞维度）", "run": _rule_mesh_tri},
     {"id": "scene_light_dup", "cfg": "scene_light_dup", "channel": "bridge", "doc": "DirectionalLight/SkyLight 重复放置", "run": _rule_scene_light_dup},
 )
 
 
 def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP,
-               recent_tasks=DEFAULT_RECENT_TASKS):
+               recent_tasks=DEFAULT_RECENT_TASKS, sample_size=DEFAULT_SAMPLE):
     profile, used_target = load_profile(project_dir, target)
     # scope 必须映射到 Content 下真实存在的目录：无效 scope 直接报错，拒绝静默跳规则出"看似干净"的残缺报告
     scope = str(scope or "/Game").strip() or "/Game"
@@ -407,8 +427,16 @@ def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP
         recent_tasks = int(recent_tasks)
     except (TypeError, ValueError):
         raise ValueError("recent_tasks 需为整数（0=扫描全部历史档案），got %r" % (recent_tasks,))
+    try:
+        sample_size = int(sample_size)
+    except (TypeError, ValueError):
+        raise ValueError("sample_size 需为整数（0=全量, >0=测最大的前 N 个大资产），got %r" % (sample_size,))
+    try:
+        cap = int(cap)
+    except (TypeError, ValueError):
+        raise ValueError("cap 需为整数（<=0=不截断，全部返回），got %r" % (cap,))
     ctx = {"project_dir": project_dir, "bus_dir": bus_dir, "scope": scope, "profile": profile,
-           "recent_tasks": recent_tasks}
+           "recent_tasks": recent_tasks, "sample_size": sample_size}
     findings, skipped = [], []
     try:
         bridge_online = _bridge_status(bus_dir)
@@ -438,22 +466,39 @@ def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP
     summary = {"error": sum(1 for x in findings if x["severity"] == "error"),
                "warn": sum(1 for x in findings if x["severity"] == "warn"),
                "skipped_rules": skipped}
+    returned = findings if cap <= 0 else findings[:cap]
+    returned_errors = sum(1 for x in returned if x["severity"] == "error")
+    scan_meta = ctx.get("scan") or {}
+    universe = len(scan_meta.get("assets", []))
+    scan_trunc = bool(scan_meta.get("truncated"))
+    measured = universe if sample_size <= 0 else min(sample_size, universe)
+    exhaustive = (not scan_trunc) and (sample_size <= 0 or sample_size >= universe)
+    if not bridge_online:
+        note = "offline half-report (bridge rules skipped)"
+    elif exhaustive:
+        note = "bridge rules measured all %d scanned assets (exhaustive within scan universe)" % universe
+    else:
+        note = ("bridge rules measure top-%d of %d scanned assets (sampled; raise sample_size or narrow scope to widen)"
+                % (sample_size, universe))
     return {
         "profile": used_target,
         "scope": scope,
         "bridge": "online" if bridge_online else "offline",
         "engine": None,
-        "note": "bridge rules measure top-80 largest assets (sampled, not exhaustive)" if bridge_online
-        else "offline half-report (bridge rules skipped)",
+        "note": note,
         "summary": summary,
         "runtime_size_downgraded": runtime_downgraded,
+        "sampling": {"sample_size": sample_size, "scan_universe": universe,
+                     "scan_universe_truncated": scan_trunc, "measured": measured,
+                     "exhaustive": exhaustive},
         "cook_archive": {"recent_tasks": recent_tasks,
                          "window_task_ids": window_ids,
                          "archive_total": ctx.get("cook_recs_total", len(window_ids))},
-        "findings": findings[:cap],
+        "findings": returned,
         "total": total,
-        "truncated": total > cap,
+        "truncated": total > len(returned),
         "cap": cap,
+        "errors_hidden": max(0, summary["error"] - returned_errors),
     }
 
 

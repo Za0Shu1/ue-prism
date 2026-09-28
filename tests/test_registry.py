@@ -107,14 +107,14 @@ def test_multiple_uproject_falls_back_to_folder(tmp_path, monkeypatch):
 def test_reproject_rename_purges_orphan_pointer(tmp_path, monkeypatch):
     """命名口径切换后，同 bus_dir 的旧名孤儿指针被清掉（不留双条）。"""
     monkeypatch.setenv("PRISM_REGISTRY_DIR", str(tmp_path / "reg"))
-    proj = tmp_path / "libvlcue"
+    proj = tmp_path / "probeProj"
     bdir = proj / "Saved" / "Prism"
     os.makedirs(str(bdir), exist_ok=True)
-    registry.register(str(bdir), str(proj))            # 无 uproject -> name=libvlcue
-    assert registry.discover()[0]["name"] == "libvlcue"
-    with open(str(proj / "VLC_Test.uproject"), "w", encoding="utf-8") as f:
+    registry.register(str(bdir), str(proj))            # 无 uproject -> name=probeProj
+    assert registry.discover()[0]["name"] == "probeProj"
+    with open(str(proj / "ProbeReal.uproject"), "w", encoding="utf-8") as f:
         f.write("{}")
-    registry.register(str(bdir), str(proj))            # 重注册 -> name=VLC_Test
+    registry.register(str(bdir), str(proj))            # 重注册 -> name=ProbeReal
     disc = registry.discover()
-    assert len(disc) == 1 and disc[0]["name"] == "VLC_Test"
-    assert registry.find("libvlcue")["name"] == "VLC_Test"  # 文件夹名仍路由到这条唯一指针# 旧名孤儿已清
+    assert len(disc) == 1 and disc[0]["name"] == "ProbeReal"
+    assert registry.find("probeProj")["name"] == "ProbeReal"  # 文件夹名仍路由到这条唯一指针# 旧名孤儿已清

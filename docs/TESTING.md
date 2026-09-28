@@ -21,6 +21,7 @@
 | `T_BigNoise` | 4096^2 源，无限幅 | `runtime_verdict=runtime_heavy`（~21MB 估算），`texture_size` 保持 error |
 | `T_FakeBig` | 同 4K 源，MaxSize=128 | `disk_only_bloat` + `capped_by_max_size`；`asset_size_top` 证据链带双证据降档 |
 | `T_CalibCube` | 引擎 TextureCube 副本 | Cube 尺寸可由源内存反推（`source_width>0`；5.4 实证无任何尺寸 API 时的兜底路径） |
+| `CalibMesh` | 引擎 StaticMesh(Cube) 副本 | 材质槽=最大 section 数（5.4 从 `get_num_sections` 派生，已知真值 1 槽）；碰撞面数在 5.4 `UStaticMesh` python 无访问器（绑定限制，非漏报） |
 | `T_Orphan1..3`、`T_Used1K` | 无引用 | `scan_orphan_assets` 全命中；`CalibMap` 作为 level_root 被正确排除 |
 | `CalibMap` | 1500 个平铺 SM_Cube（`PRISM_FIXTURE_ACTORS` 可调） | compose 聚合 world>=1400；`/Engine/BasicShapes/Cube x1500` 进合批机会清单 |
 
@@ -40,11 +41,11 @@
 | `describe_asset` / `get_asset_references` | test_assets / test_pr05_contract | 经 metrics/report 间接 | 大引用面性能 |
 | `get_asset_chain`（环/god/影响半径） | test_assets(+SCC 纯逻辑) / test_buscall | -（小图 smoke） | 真实大工程的大闭包耗时、god_min_refs 阈值手感 |
 | `scan_orphan_assets` | test_orphan_degrade | orphan.targets_found / map_not_orphaned | 真实工程假阳性抽检 >=20 条 |
-| `get_asset_metrics`（真大/假大） | test_metrics_degrade / test_metrics_runtime | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat | 真实美术资产压缩格式下 est 口径偏差 |
+| `get_asset_metrics`（真大/假大+材质槽） | test_metrics_degrade / test_metrics_runtime | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat / mesh_material_slots | 真实美术资产压缩格式下 est 口径偏差；碰撞面数 5.4 `UStaticMesh` python 无访问器（绑定限制，见资产表 CalibMesh 行）|
 | `list_level_actors`（compose） | test_actors_compose | compose.world_ge_1400 / cube_batching_opportunity | 真实 WP 关卡全载成本 |
-| `read_editor_log` / `attribute_cook_errors` | test_logscan / test_attribute | - | 与真实 cook 日志联动的归因抽检 |
+| `read_editor_log`（P2 指纹归一+资产归因） / `attribute_cook_errors` | test_logscan / test_attribute | -（纯离线，真实工程日志直读验证 distinct 194->10、LogPackageName 196 合 1 组归因 195 资产） | 与真实 cook 日志联动的归因抽检 |
 | `scan_folder_assets` | test_folderscan | -（report 间接） | - |
-| `get_perf_report`（7 规则+降档） | test_rules / test_rules_runtime | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded | 大工程 top-80 抽样代表性 |
+| `get_perf_report`（7 规则+降档+可配采样/cap） | test_rules / test_rules_runtime | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded / cap_truncates_and_flags_hidden_errors / sampling_fields | sample_size/cap 可配（默认 top-80/cap=50）；大工程须显式调大 sample_size 或缩 scope。5.4 真机实测 sample_size 80→200 使 total 245→356（暴露 73 个被旧硬编码藏起的 error）|
 | `cook_package` / `get_cook_status` | test_cook / test_tasks | -（cook 需真工程，不在夹具内） | 真 cook 全链路（已有 9/22 档案佐证） |
 | `preview_asset_migration` | test_migration_preview | - | - |
 | `migrate_asset_rename` / `_move` / `_asset`（写） | test_migrate（双钥/dry_run/回滚） | - | 版本管理下的真实改名抽验 |
