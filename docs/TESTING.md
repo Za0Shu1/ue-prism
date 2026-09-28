@@ -21,6 +21,7 @@
 | `T_BigNoise` | 4096^2 源，无限幅 | `runtime_verdict=runtime_heavy`（~21MB 估算），`texture_size` 保持 error |
 | `T_FakeBig` | 同 4K 源，MaxSize=128 | `disk_only_bloat` + `capped_by_max_size`；`asset_size_top` 证据链带双证据降档 |
 | `T_CalibCube` | 引擎 TextureCube 副本 | Cube 尺寸可由源内存反推（`source_width>0`；5.4 实证无任何尺寸 API 时的兜底路径） |
+| `CalibMesh` | 引擎 StaticMesh(Cube) 副本 | 材质槽=最大 section 数（5.4 从 `get_num_sections` 派生，已知真值 1 槽）；碰撞面数在 5.4 `UStaticMesh` python 无访问器（绑定限制，非漏报） |
 | `T_Orphan1..3`、`T_Used1K` | 无引用 | `scan_orphan_assets` 全命中；`CalibMap` 作为 level_root 被正确排除 |
 | `CalibMap` | 1500 个平铺 SM_Cube（`PRISM_FIXTURE_ACTORS` 可调） | compose 聚合 world>=1400；`/Engine/BasicShapes/Cube x1500` 进合批机会清单 |
 
@@ -40,7 +41,7 @@
 | `describe_asset` / `get_asset_references` | test_assets / test_pr05_contract | 经 metrics/report 间接 | 大引用面性能 |
 | `get_asset_chain`（环/god/影响半径） | test_assets(+SCC 纯逻辑) / test_buscall | -（小图 smoke） | 真实大工程的大闭包耗时、god_min_refs 阈值手感 |
 | `scan_orphan_assets` | test_orphan_degrade | orphan.targets_found / map_not_orphaned | 真实工程假阳性抽检 >=20 条 |
-| `get_asset_metrics`（真大/假大） | test_metrics_degrade / test_metrics_runtime | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat | 真实美术资产压缩格式下 est 口径偏差 |
+| `get_asset_metrics`（真大/假大+材质槽） | test_metrics_degrade / test_metrics_runtime | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat / mesh_material_slots | 真实美术资产压缩格式下 est 口径偏差；碰撞面数 5.4 `UStaticMesh` python 无访问器（绑定限制，见资产表 CalibMesh 行）|
 | `list_level_actors`（compose） | test_actors_compose | compose.world_ge_1400 / cube_batching_opportunity | 真实 WP 关卡全载成本 |
 | `read_editor_log` / `attribute_cook_errors` | test_logscan / test_attribute | - | 与真实 cook 日志联动的归因抽检 |
 | `scan_folder_assets` | test_folderscan | -（report 间接） | - |

@@ -198,6 +198,12 @@ def _derive_texture_geometry(obj, m):
                                      * BC_BYTES_PER_TEXEL * MIP_CHAIN_FACTOR)
 
 
+def _material_slots_from_lods(lods):
+    """各 LOD 的 section 数即材质槽数（section 与 material slot 一一对应）；取跨 LOD 最大值。无则 None。"""
+    secs = [int(l.get("sections") or 0) for l in (lods or []) if l.get("sections")]
+    return max(secs) if secs else None
+
+
 def _measure_mesh(unreal, obj, tried):
     """返回 {"lods":[{"index","triangles"?,"sections"?}]} 或 None。"""
     nlods = None
@@ -243,6 +249,7 @@ def _measure_mesh(unreal, obj, tried):
     for name, call in (
         ("get_lod_used_materials", lambda: len(obj.get_lod_used_materials(0))),
         ("prop:render_materials", lambda: len(_prop(obj, "render_materials"))),
+        ("prop:static_materials", lambda: len(_prop(obj, "static_materials"))),
     ):
         try:
             v = call()
@@ -253,6 +260,12 @@ def _measure_mesh(unreal, obj, tried):
             out["material_slots"] = int(v)
             tried.append(name)
             break
+    # 5.4 校准：上面候选在本引擎绑定时全 miss，但 get_num_sections 命中 -> 材质槽=最大 section 数
+    if "material_slots" not in out:
+        ms = _material_slots_from_lods(lods)
+        if ms is not None:
+            out["material_slots"] = ms
+            tried.append("sections->material_slots")
     for name, call in (
         ("get_num_collision_triangles", lambda: obj.get_num_collision_triangles()),
         ("get_collision_number", lambda: obj.get_collision_number()),
@@ -455,7 +468,8 @@ def probe_asset_api(asset_path):
     if obj is None:
         return {"note": "load_failed", "query": object_path}
     keys = ("size", "surface", "lod", "mip", "collision", "material",
-            "stream", "format", "memory", "source")
+            "stream", "format", "memory", "source",
+            "section", "tri", "num", "vertex", "body", "setup", "simple", "agggeom")
     names = [n for n in dir(obj) if any(k in n.lower() for k in keys)]
     feedback = []
     for n in sorted(names)[:40]:

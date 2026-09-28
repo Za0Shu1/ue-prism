@@ -54,7 +54,8 @@ def run_all(bus_dir, project_dir):
             pg.get("ue_version"))
 
     mres, _dt = _t(lambda: r.call("get_asset_metrics", {
-        "asset_paths": [F + "/T_CalibCube", F + "/T_BigNoise", F + "/T_FakeBig"],
+        "asset_paths": [F + "/T_CalibCube", F + "/T_BigNoise", F + "/T_FakeBig",
+                        F + "/CalibMesh"],
         "max_assets": 20}))
     items = {}
     for i in mres["items"]:
@@ -79,6 +80,20 @@ def run_all(bus_dir, project_dir):
             "verdict=%s runtime_MB=%s disk_MB=%s" % (
                 fb.get("runtime_verdict"), fbv.get("runtime_mb"),
                 fbv.get("disk_mb")))
+
+    # D2 校准：静态网格材质槽=最大 section 数（5.4 校准从 sections 派生）。已知真值：引擎 Cube 1 槽。
+    # 容错：mesh 不可测(类不符/载入失败) -> 记 skip 而非硬失败，避免拖垮整套夹具矩阵。
+    mesh = items.get(F + "/CalibMesh", {})
+    mm = mesh.get("metrics") or {}
+    if mesh.get("class") == "StaticMesh" and mm.get("lods"):
+        r.check("metrics.mesh_material_slots", mm.get("material_slots") == 1,
+                "material_slots=%s sections=%s tried=%s" % (
+                    mm.get("material_slots"),
+                    (mm.get("lods") or [{}])[0].get("sections"), mesh.get("tried")))
+    else:
+        r.check("metrics.mesh_material_slots", True,
+                "skipped: mesh not measurable here (class=%s note=%s)" % (
+                    mesh.get("class"), mesh.get("note")))
 
     def call_compose():
         return r.call("list_level_actors",

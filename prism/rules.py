@@ -24,17 +24,17 @@ from . import attributelog, bus, folderscan, tasks
 PROFILES = {
     "pc": {"asset_size_mb": {"warn": 20.0, "error": 100.0},
            "texture_px": {"warn": 2048, "error": 4096},
-           "mesh_tri": {"warn": 200000, "error": 1000000},
+           "mesh_tri": {"warn": 200000, "error": 1000000, "mat_slots_warn": 8},
            "wps_external_actors": {"warn": 300, "error": 1000},
            "scene_light_dup": {"max_dup": 1}},
     "console": {"asset_size_mb": {"warn": 10.0, "error": 50.0},
                 "texture_px": {"warn": 2048, "error": 4096},
-                "mesh_tri": {"warn": 150000, "error": 500000},
+                "mesh_tri": {"warn": 150000, "error": 500000, "mat_slots_warn": 4},
                 "wps_external_actors": {"warn": 300, "error": 1000},
                 "scene_light_dup": {"max_dup": 1}},
     "mobile": {"asset_size_mb": {"warn": 5.0, "error": 20.0},
                "texture_px": {"warn": 1024, "error": 2048},
-               "mesh_tri": {"warn": 50000, "error": 150000},
+               "mesh_tri": {"warn": 50000, "error": 150000, "mat_slots_warn": 4},
                "wps_external_actors": {"warn": 200, "error": 600},
                "scene_light_dup": {"max_dup": 1}},
 }
@@ -289,9 +289,15 @@ def _rule_mesh_tri(ctx):
         else:
             continue
         evidence = {"triangles_lod0": top, "lod_count": m.get("lod_count")}
+        if m.get("material_slots"):
+            evidence["material_slots"] = int(m["material_slots"])
+        if m.get("collision_triangles"):
+            evidence["collision_triangles"] = int(m["collision_triangles"])
         advice = "reduce complexity / add LODs"
         if (m.get("lod_count") or 0) <= 1:
             advice = "single-LOD high-poly mesh: author LODs first"
+        if m.get("material_slots") and int(m["material_slots"]) >= int(th.get("mat_slots_warn", 8)):
+            advice += " (many material slots split draw calls)"
         out.append({"rule_id": "mesh_tri", "severity": sev, "subject": pkg,
                     "evidence": evidence, "threshold": limit, "advice": advice})
     return out
@@ -404,7 +410,7 @@ RULES = (
     {"id": "cook_empty_maps", "cfg": None, "channel": "offline", "doc": "请求的 map 从未被 cook / 0 包空 cook（校准发现②）", "run": _rule_cook_empty_maps},
     {"id": "wps_external_actors", "cfg": "wps_external_actors", "channel": "offline", "doc": "WP 外部 actor 包数量超阈值（真机案例 148 包）", "run": _rule_wps_external_actors},
     {"id": "texture_size", "cfg": "texture_px", "channel": "bridge", "doc": "纹理尺寸超阈值（按 sample_size 抽样度量最大资产）", "run": _rule_texture_size},
-    {"id": "mesh_tri", "cfg": "mesh_tri", "channel": "bridge", "doc": "网格 LOD0 三角数超阈值/单 LOD 高模", "run": _rule_mesh_tri},
+    {"id": "mesh_tri", "cfg": "mesh_tri", "channel": "bridge", "doc": "网格 LOD0 三角数超阈值/单 LOD 高模（附材质槽/碰撞维度）", "run": _rule_mesh_tri},
     {"id": "scene_light_dup", "cfg": "scene_light_dup", "channel": "bridge", "doc": "DirectionalLight/SkyLight 重复放置", "run": _rule_scene_light_dup},
 )
 
