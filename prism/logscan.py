@@ -1,4 +1,4 @@
-"""read_editor_log 的离线解析：纯标准库，不依赖 UE/bridge（docs/REQUIREMENTS.md §2 S1）。
+"""read_editor_log 的离线解析：纯标准库，不依赖 UE/bridge（REQUIREMENTS §2 S1）。
 
 UE 编辑器日志（<proj>/Saved/Logs/*.log）行形如：
     [2024.05.01-03.35.12:345][  12]LogStreaming: Error: Failed to load resource 101

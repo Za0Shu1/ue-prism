@@ -1,6 +1,6 @@
 """统一返回信封与错误码。纯标准库，server / bridge / domain 三层通用。
 
-契约见 docs/REQUIREMENTS.md §3：错误绝不伪装成成功。
+契约见 REQUIREMENTS §3：错误绝不伪装成成功。
 """
 from __future__ import annotations
 

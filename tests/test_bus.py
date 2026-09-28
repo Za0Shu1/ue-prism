@@ -1,6 +1,6 @@
 """无引擎环境下的文件总线测试：BusClient(server侧) <-> bridge.handler 跑通 ping。
 
-对应 docs/REQUIREMENTS.md §4.1。纯标准库，不需要 UE，也不需要 mcp SDK。
+对应 REQUIREMENTS §4.1。纯标准库，不需要 UE，也不需要 mcp SDK。
 """
 from __future__ import annotations
 

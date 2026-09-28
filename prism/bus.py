@@ -1,4 +1,4 @@
-"""文件总线：server 与 UE 内 bridge 之间经文件系统做 RPC（见 docs/REQUIREMENTS.md §2）。
+"""文件总线：server 与 UE 内 bridge 之间经文件系统做 RPC（见 REQUIREMENTS §2）。
 
 - 零 socket、零第三方依赖，仅标准库；
 - 命令 cmd_<id>.json -> 响应 res_<id>.json，均原子写（tmp + os.replace）；

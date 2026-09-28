@@ -1,4 +1,4 @@
-"""MCP server：把工具暴露给 MCP 客户端。server 侧不碰引擎 API（见 docs/REQUIREMENTS.md §2）。
+"""MCP server：把工具暴露给 MCP 客户端。server 侧不碰引擎 API（见 REQUIREMENTS §2）。
 
 - 桥工具（ping / list_level_actors / describe_asset / get_asset_references / get_asset_metrics）：
   经文件总线问编辑器内的 bridge（需编辑器在线）。

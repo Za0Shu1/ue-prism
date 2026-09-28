@@ -1,7 +1,7 @@
 """scan_folder_assets 的离线磁盘扫描：纯标准库，不依赖 UE/bridge。
 
 把 /Game/... 虚拟路径映射到 <project>/Content/... 实际目录，按磁盘大小排序、
-按类型（uasset/umap）汇总占用，给出 Top 开销文件。对应 docs/REQUIREMENTS.md §2 S2 底座。
+按类型（uasset/umap）汇总占用，给出 Top 开销文件。对应 REQUIREMENTS §2 S2 底座。
 注意：读的是磁盘上已保存的 .uasset/.umap（离线快照），非编辑器内存态。
 """
 from __future__ import annotations

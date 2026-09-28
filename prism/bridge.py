@@ -1,7 +1,7 @@
 """bridge：UE 编辑器内的最薄适配器。换引擎/换传输只动这一层。
 
 - 生产：start(bus_dir) 把总线轮询挂到主线程 slate post-tick（UE 5.6+ 禁非 game thread 调 unreal）；
-- 测试：run_forever(bus_dir) 阻塞轮询，仅用于无引擎环境（docs/REQUIREMENTS.md §4.1）。
+- 测试：run_forever(bus_dir) 阻塞轮询，仅用于无引擎环境（REQUIREMENTS §4.1）。
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """资产层只读工具：describe_asset / get_asset_references（经 bridge，在编辑器内执行）。
 
-对应 docs/REQUIREMENTS.md §2 S3「引用」与 §6 已知风险。AssetRegistry 方法签名跨 5.0-5.8
+对应 REQUIREMENTS §2 S3「引用」与 §6 已知风险。AssetRegistry 方法签名跨 5.0-5.8
 有漂移 -> 「多候选签名 + best-effort」，取到即用、取不到返回空并带 note，绝不裸崩。
 无引擎（总线降级测试）时结构不变、返回空结果。
 
