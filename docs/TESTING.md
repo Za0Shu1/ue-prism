@@ -44,7 +44,7 @@
 | `list_level_actors`（compose） | test_actors_compose | compose.world_ge_1400 / cube_batching_opportunity | 真实 WP 关卡全载成本 |
 | `read_editor_log` / `attribute_cook_errors` | test_logscan / test_attribute | - | 与真实 cook 日志联动的归因抽检 |
 | `scan_folder_assets` | test_folderscan | -（report 间接） | - |
-| `get_perf_report`（7 规则+降档） | test_rules / test_rules_runtime | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded | 大工程 top-80 抽样代表性 |
+| `get_perf_report`（7 规则+降档+可配采样/cap） | test_rules / test_rules_runtime | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded / cap_truncates_and_flags_hidden_errors / sampling_fields | sample_size/cap 可配（默认 top-80/cap=50）；大工程须显式调大 sample_size 或缩 scope。5.4 真机实测 sample_size 80→200 使 total 245→356（暴露 73 个被旧硬编码藏起的 error）|
 | `cook_package` / `get_cook_status` | test_cook / test_tasks | -（cook 需真工程，不在夹具内） | 真 cook 全链路（已有 9/22 档案佐证） |
 | `preview_asset_migration` | test_migration_preview | - | - |
 | `migrate_asset_rename` / `_move` / `_asset`（写） | test_migrate（双钥/dry_run/回滚） | - | 版本管理下的真实改名抽验 |

@@ -361,3 +361,63 @@ def test_cook_drop_disk_recheck(tmp_path):
     rep_fixed = rules.run_report(proj, b)
     subs = {f["subject"] for f in rep_fixed["findings"] if f["rule_id"] == "cook_drop"}
     assert "/Game/Fixed/Mesh" not in subs and "/Game/StillGone/Mesh" in subs
+
+
+# ---- D1: 采样/ cap 可配置 + 诚实暴露（get_perf_report 欠采样修复）----
+
+def _proj_many_big(tmp_path, n, toml=TOML):
+    """建 n 个超 error 阈值的 .uasset（各 3000B -> 0.00286MB > 0.002），供 cap/截断测试。"""
+    proj = tmp_path / "ProjMany"
+    (proj / "Content" / "Big").mkdir(parents=True)
+    for i in range(n):
+        (proj / "Content" / "Big" / ("H%d.uasset" % i)).write_bytes(b"y" * 3000)
+    (proj / "prism.toml").write_text(toml, encoding="utf-8")
+    return str(proj)
+
+
+def test_sample_assets_pure():
+    assets = [{"asset_path": "/Game/A%d" % i, "size_bytes": 1000 - i} for i in range(10)]
+    assert [a["asset_path"] for a in rules._sample_assets(assets, 3)] == ["/Game/A0", "/Game/A1", "/Game/A2"]
+    assert len(rules._sample_assets(assets, 0)) == 10          # 0 = 全量(取扫描宇宙)
+    assert len(rules._sample_assets(assets, -1)) == 10         # 负 = 全量
+    assert len(rules._sample_assets(assets, 100)) == 10        # 超宇宙 = 全量
+    assert len(rules._sample_assets(assets, "bad")) == 10      # 非法 -> 默认 80 -> 宇宙仅 10
+    many = [{"asset_path": "/Game/M%d" % i} for i in range(200)]
+    assert len(rules._sample_assets(many, None)) == rules.DEFAULT_SAMPLE  # 非法且样本足够 -> 按默认截断
+
+
+def test_report_cap_truncates_and_flags_hidden_errors(tmp_path):
+    proj = _proj_many_big(tmp_path, 5)
+    b = _bus(tmp_path)
+    rep = rules.run_report(proj, b, cap=2)
+    assert rep["total"] == 5 and rep["cap"] == 2 and rep["truncated"] is True
+    assert len(rep["findings"]) == 2
+    assert rep["summary"]["error"] == 5 and rep["errors_hidden"] == 3
+    assert all(f["severity"] == "error" for f in rep["findings"])  # error 优先，截的是尾部
+
+
+def test_report_cap_zero_returns_all(tmp_path):
+    proj = _proj_many_big(tmp_path, 5)
+    b = _bus(tmp_path)
+    rep = rules.run_report(proj, b, cap=0)
+    assert rep["truncated"] is False and rep["errors_hidden"] == 0
+    assert len(rep["findings"]) == 5 and rep["cap"] == 0
+
+
+def test_report_sampling_fields(tmp_path):
+    proj = _proj_many_big(tmp_path, 3)
+    b = _bus(tmp_path)
+    s = rules.run_report(proj, b, sample_size=2)["sampling"]
+    assert s["sample_size"] == 2 and s["scan_universe"] == 3
+    assert s["measured"] == 2 and s["exhaustive"] is False
+    s0 = rules.run_report(proj, b, sample_size=0)["sampling"]
+    assert s0["exhaustive"] is True and s0["measured"] == s0["scan_universe"] == 3
+
+
+def test_report_bad_sample_size_or_cap(tmp_path):
+    proj = _proj_many_big(tmp_path, 1)
+    b = _bus(tmp_path)
+    with pytest.raises(ValueError):
+        rules.run_report(proj, b, sample_size="lots")
+    with pytest.raises(ValueError):
+        rules.run_report(proj, b, cap="many")
