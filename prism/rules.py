@@ -324,11 +324,22 @@ def _rule_scene_light_dup(ctx):
 def _map_cooked_on_disk(project_dir, map_key):
     """增量 cook 全保留(no-op)时日志不会有任何该 map 的逐包行——用磁盘 cook 产物做第二证据源。
 
-    Saved/Cooked/<平台>/<工程>/Content/<地图>.umap 存在 = 曾被成功 cook（本会话只是没重煮它）。
+    Saved/Cooked/<平台>/<工程>/Content/<地图完整子路径>.umap 存在 = 曾被成功 cook（增量 no-op 只是没重煮它）。
     """
-    stem = map_key.rpartition("/")[2]
-    pat = os.path.join(str(project_dir), "Saved", "Cooked", "*", "*", "Content", stem + ".umap")
-    return bool(glob.glob(pat))
+    mk = str(map_key).replace("\\", "/")
+    if mk.startswith("/Game/"):
+        rel = mk[len("/Game/"):]
+    else:
+        rel = mk.strip("/")
+    if not rel:
+        return False
+    stem = rel.rpartition("/")[2]
+    head = os.path.join(str(project_dir), "Saved", "Cooked", "*", "*", "Content")
+    # cooked 地图按 /Game 下完整层级镜像落盘（真机通常不在 Content 根），精确匹配子路径
+    if glob.glob(os.path.join(head, *rel.split("/")) + ".umap"):
+        return True
+    # 兜底：map_key 只给短名时按任意深度同名匹配
+    return bool(glob.glob(os.path.join(head, "**", stem + ".umap"), recursive=True))
 
 
 def _rule_cook_empty_maps(ctx):

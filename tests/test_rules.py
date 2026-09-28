@@ -421,3 +421,23 @@ def test_report_bad_sample_size_or_cap(tmp_path):
         rules.run_report(proj, b, sample_size="lots")
     with pytest.raises(ValueError):
         rules.run_report(proj, b, cap="many")
+
+
+def test_nested_map_cooked_disk_evidence(tmp_path):
+    """真机回归：地图在 /Game 深层子目录(非 Content 根)时，增量 no-op 的磁盘证据须按完整层级匹配。
+    复现真实工程嵌套 map 被 cook_empty_maps 误报 cooked_artifact_absent 的假阳性。"""
+    proj = _proj(tmp_path)
+    b = _bus(tmp_path)
+    noop_log = ("LogCook: Display: Keeping 11879. Recooking 1. Removing 0.\n"
+                "LogCook: Display: Cooked packages 11915 Packages Remain 0 Total 11915\nBUILD SUCCESSFUL\n")
+    _task_with_log(b, proj, 'UAT BuildCookRun -iterate +maps="/Game/Code/Level/LV_Main"', noop_log)
+    rep = rules.run_report(proj, b)
+    hits = [f for f in rep["findings"] if f["rule_id"] == "cook_empty_maps"]
+    assert len(hits) == 1 and hits[0]["subject"] == "/Game/Code/Level/LV_Main"
+    assert hits[0]["evidence"]["disk_check"] == "cooked_artifact_absent"
+    # 按 /Game 完整层级落盘 -> 不再报（旧实现在 Content 根浅匹配处假阳性）
+    umap = os.path.join(proj, "Saved", "Cooked", "Windows", "Proj", "Content", "Code", "Level", "LV_Main.umap")
+    os.makedirs(os.path.dirname(umap))
+    open(umap, "wb").write(b"x")
+    rep2 = rules.run_report(proj, b)
+    assert [f for f in rep2["findings"] if f["rule_id"] == "cook_empty_maps"] == []
