@@ -219,7 +219,12 @@ def scan_orphan_assets(folder: Annotated[str, Field(description="扫描范围，
 # ---------------- 离线工具（读磁盘） ----------------
 
 def read_editor_log(level: Annotated[str, Field(description="Error|Warning|Display|All")] = "Error", tail: Annotated[int, Field(description="从日志末尾读取的行数")] = 2000, top: Annotated[int, Field(description="聚合分组上限")] = 30, project_dir: Annotated[str | None, Field(description="显式工程目录（与 project= 二选一）")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """Aggregate editor log lines by message (category/count/first_seen/sample). Offline; no bridge needed."""
+    """Aggregate editor log lines by normalized fingerprint (category/count/first_seen/sample). Offline; no bridge needed.
+
+    P2 指纹归一：路径/引号串/十六进制地址/数字抹平成 <path>/<addr>/#，把"同模板不同资产/帧号"的
+    噪音行合并成一个组（真实大工程实测 Warning distinct 194->10）。每组从原文登记 assets（/Game、
+    /Engine、.uasset/.umap 引用）与 asset_count/assets_truncated，支持 warning 归因到具体资产。
+    """
     pd, err = _resolve_offline_dir(project_dir, project)
     if err:
         return err

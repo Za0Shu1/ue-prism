@@ -2,7 +2,9 @@
 
 UE 编辑器日志（<proj>/Saved/Logs/*.log）行形如：
     [2024.05.01-03.35.12:345][  12]LogStreaming: Error: Failed to load resource 101
-本模块把 tail 行按"类别 + 归一化消息"聚合，返回 count/first_seen/sample，供 agent 归因。
+本模块把 tail 行按"类别 + 归一化指纹"聚合，返回 count/first_seen/sample + 资产归因，供 agent 定位。
+指纹归一（P2）：绝对/引擎/相对路径、带引号串、十六进制地址、数字 -> 占位符，让"同模板不同资产/
+帧号"的噪音行合并成一个组；同时从原文提取 /Game、/Engine、.uasset/.umap 引用登记到组的 assets。
 注意：读的是磁盘上的历史文件（realtime=false），编辑器关闭后仍能读上次落盘内容。
 """
 from __future__ import annotations
@@ -17,6 +19,24 @@ from datetime import datetime
 _LINE = re.compile(r"^\[(?P<ts>[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9:. ]+)\]\[[ 0-9]*\]\s*(?P<rest>.*)$")
 _HEAD = re.compile(r"^(?P<cat>[A-Za-z0-9_]+):\s*(?P<body>.*)$")
 
+# 指纹归一：路径 / 引擎包 / 相对 -> <path>；停止集只用空白（避开正则里嵌入引号的转义）
+_PATH_RE = re.compile(
+    r"[A-Za-z]:[\\/][^\s]+|(?:/Game/|/Engine/|/Plugins?/|/Content/|/Script/|\.\./)[^\s]+",
+    re.IGNORECASE,
+)
+_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
+_NUM_RE = re.compile(r"\d+")
+
+# 资产归因：抽 /Game /Engine /Plugins 包路径（可含非 ASCII）与绝对 .uasset/.umap。
+# 边界要求引用前是行首/空白/括号/逗号/等号，避免相对路径里的 /Engine 子串被误登记。
+_ASSET_RE = re.compile(
+    r"(?:^|(?<=[\s(,=]))(?:/Game/|/Engine/|/Plugins?/)[^\s]+|"
+    r"[A-Za-z]:[\\/][^\s]*\.(?:uasset|umap)",
+    re.IGNORECASE,
+)
+
+ASSET_CAP = 20
+
 
 def _classify(body):
     b = body.strip()
@@ -30,9 +50,19 @@ def _classify(body):
 
 
 def _norm(msg):
-    m = re.sub(r"0x[0-9a-fA-F]+", "<addr>", msg)
-    m = re.sub(r"\d+", "#", m)
+    m = _PATH_RE.sub("<path>", msg)
+    m = _HEX_RE.sub("<addr>", m)
+    m = _NUM_RE.sub("#", m)
     return " ".join(m.split())
+
+
+def _extract_assets(msg):
+    seen = []
+    for tok in _ASSET_RE.findall(msg):
+        t = tok.rstrip(".,;:")
+        if t and t not in seen:
+            seen.append(t)
+    return seen
 
 
 def _find_log(project_dir):
@@ -69,17 +99,25 @@ def read_editor_log(project_dir, level="Error", tail=2000, top=30):
         if want and lvl != want:
             continue
         total += 1
-        key = cat + "|" + _norm(core)
+        fp = _norm(core)
+        key = cat + "|" + fp
         g = groups.get(key)
         if g is None:
-            groups[key] = {
-                "category": cat, "level": lvl,
-                "message": core[:400], "count": 1,
-                "first_seen": ts, "sample": line[:800],
-            }
-        else:
-            g["count"] += 1
-    ordered = sorted(groups.values(), key=lambda g: g["count"], reverse=True)
+            g = {"category": cat, "level": lvl, "message": core[:400], "fingerprint": fp,
+                 "count": 0, "first_seen": ts, "sample": line[:800], "_aset": []}
+            groups[key] = g
+        g["count"] += 1
+        for a in _extract_assets(core):
+            if a not in g["_aset"]:
+                g["_aset"].append(a)
+    ordered = []
+    for g in groups.values():
+        aset = g.pop("_aset")
+        g["assets"] = aset[:ASSET_CAP]
+        g["asset_count"] = len(aset)
+        g["assets_truncated"] = len(aset) > ASSET_CAP
+        ordered.append(g)
+    ordered.sort(key=lambda x: x["count"], reverse=True)
     return {
         "log_file": path,
         "source": "file",
