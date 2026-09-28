@@ -19,6 +19,7 @@ from prism import bus, rules  # noqa: E402
 F = "/Game/PrismCalib"
 ORPHAN_TARGETS = {"T_BigNoise", "T_FakeBig", "T_Used1K",
                   "T_Orphan1", "T_Orphan2", "T_Orphan3", "T_CalibCube"}
+TMPDIR = F + "/_pwtmp"
 
 
 def _t(fn):
@@ -45,6 +46,74 @@ class Runner:
                              "evidence": evidence})
         mark = "PASS" if cond else "FAIL"
         print("%-4s %s | %s" % (mark, name, evidence))
+
+
+def _migrate_rename_roundtrip(r):
+    """真机写路径校验（内存态，自还原，不落盘）：改名 fixture 纹理 -> 核对
+    注册表旧路径消失/新路径存在 -> 改回。执行 5.4 真机 rename_asset 候选链。"""
+    pkg = F + "/T_CalibCube"
+    leaf = "T_CalibCube"
+    tmp = F + "/Z_pwtrip"
+    base = r.call("describe_asset", {"asset_path": pkg})
+    if not base.get("found"):
+        r.check("migrate.rename_applies_redirect", False, "baseline missing: %s" % base)
+        return
+    try:
+        rn = r.call("migrate_asset_rename", {
+            "asset_path": pkg, "new_name": "Z_pwtrip",
+            "confirm": True, "fixup_redirectors": False})
+        dnew = r.call("describe_asset", {"asset_path": tmp})
+        dold = r.call("describe_asset", {"asset_path": pkg})
+        fwd_ok = (rn.get("success") is True and dnew.get("found") is True
+                  and dold.get("found") is False)
+        r.check("migrate.rename_applies_redirect", fwd_ok,
+                {"rename_api": rn.get("api"), "tried": rn.get("tried"),
+                 "new_found": dnew.get("found"), "old_found": dold.get("found")})
+    finally:
+        try:
+            rb = r.call("migrate_asset_rename", {
+                "asset_path": tmp, "new_name": leaf,
+                "confirm": True, "fixup_redirectors": False})
+            dback = r.call("describe_asset", {"asset_path": pkg})
+            r.check("migrate.rename_restored",
+                    rb.get("success") is True and dback.get("found") is True,
+                    {"restored_found": dback.get("found")})
+        except Exception as e:
+            r.check("migrate.rename_restored", False, "exception: %r" % (e,))
+
+
+def _migrate_move_roundtrip(r):
+    """真机 move 校验（内存态，自还原）：移动到临时子目录 -> 核对 -> 移回。
+    5.4 无 move_asset，走 rename_asset 全路径兜底（本检查固化该兜底真机路径）。"""
+    src = F + "/T_Used1K"
+    leaf = "T_Used1K"
+    moved = TMPDIR + "/" + leaf
+    base = r.call("describe_asset", {"asset_path": src})
+    if not base.get("found"):
+        r.check("migrate.move_applies", False, "baseline missing: %s" % base)
+        return
+    try:
+        mv = r.call("migrate_asset_move", {
+            "asset_path": src, "dest_path": TMPDIR,
+            "confirm": True, "fixup_redirectors": False})
+        dnew = r.call("describe_asset", {"asset_path": moved})
+        dold = r.call("describe_asset", {"asset_path": src})
+        fwd_ok = (mv.get("success") is True and dnew.get("found") is True
+                  and dold.get("found") is False)
+        r.check("migrate.move_applies", fwd_ok,
+                {"move_api": mv.get("api"), "tried": mv.get("tried"),
+                 "new_found": dnew.get("found"), "old_found": dold.get("found")})
+    finally:
+        try:
+            back = r.call("migrate_asset_move", {
+                "asset_path": moved, "dest_path": F, "new_name": leaf,
+                "confirm": True, "fixup_redirectors": False})
+            dback = r.call("describe_asset", {"asset_path": src})
+            r.check("migrate.move_restored",
+                    back.get("success") is True and dback.get("found") is True,
+                    {"restored_found": dback.get("found")})
+        except Exception as e:
+            r.check("migrate.move_restored", False, "exception: %r" % (e,))
 
 
 def run_all(bus_dir, project_dir):
@@ -143,6 +212,8 @@ def run_all(bus_dir, project_dir):
                                   for f in tex.values())
     r.check("report.texture_evidence_upgraded", ok_fields,
             "fields ok" if tex else "no texture_size findings")
+    _migrate_rename_roundtrip(r)
+    _migrate_move_roundtrip(r)
     matrix = {
         "ue_version": pg.get("ue_version"),
         "metrics_tried": {k: v.get("tried") for k, v in items.items()},
