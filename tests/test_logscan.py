@@ -92,3 +92,45 @@ def test_extract_assets_forms():
     assert any(t.endswith("Mesh.uasset") for t in got)
     assert any(t.startswith("/Engine/BasicShapes/Cube") for t in got)
     assert logscan._extract_assets("/Game/A /Game/A /Game/A") == ["/Game/A"]   # 去重
+
+# ---- P2: 按会话切分（日志未轮转时同一文件含多个 "Log file open"） ----
+
+SAMPLE_MULTI = (
+    "Log file open, 09/28/26 17:00:00\n"
+    "[2024.05.01-03.35.12:345][  12]LogStreaming: Error: Failed to load resource 101\n"
+    "[2024.05.01-03.35.12:400][  13]LogStreaming: Error: Failed to load resource 102\n"
+    "[2024.05.01-03.35.13:000][  20]LogTemp: Warning: thing 1 is odd\n"
+    "Log file open, 09/29/26 10:49:57\n"
+    "[2024.05.01-04.00.00:000][   5]LogStreaming: Error: Failed to load resource 200\n"
+    "[2024.05.01-04.00.00:100][   6]LogNet: Error: socket closed unexpectedly\n"
+)
+
+
+def test_multi_session_split(tmp_path):
+    r = logscan.read_editor_log(_proj(tmp_path, SAMPLE_MULTI), level="Error")
+    assert r["session_count"] == 2 and r["multi_session_in_tail"] is True
+    assert r["note"]                       # 多会话时给提示，单会话时为 None
+    byfp = {g["fingerprint"]: g for g in r["groups"]}
+    shared = byfp["Failed to load resource #"]
+    # 101/102 在会话1，200 在会话2 -> 跨两个会话、非本会话新增
+    assert shared["count"] == 3
+    assert shared["sessions"] == [1, 2] and shared["session_span"] == 2
+    assert shared["in_latest_session"] is True and shared["new_in_latest_session"] is False
+    only_new = byfp["socket closed unexpectedly"]
+    # 仅出现在最新会话 -> 本会话新增（回归信号）
+    assert only_new["sessions"] == [2] and only_new["new_in_latest_session"] is True
+
+
+def test_sessions_level_tallies(tmp_path):
+    r = logscan.read_editor_log(_proj(tmp_path, SAMPLE_MULTI), level="All")
+    sess = {s["session_id"]: s for s in r["sessions"]}
+    assert sess[1]["error"] == 2 and sess[1]["warning"] == 1
+    assert sess[2]["error"] == 2
+    assert all(s["lines"] > 0 for s in r["sessions"])   # 空的前置段已剔除
+
+
+def test_single_session_not_multi(tmp_path):
+    r = logscan.read_editor_log(_proj(tmp_path, SAMPLE), level="Error")
+    assert r["session_count"] == 1 and r["multi_session_in_tail"] is False
+    assert r["note"] is None
+
