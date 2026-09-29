@@ -60,11 +60,12 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 | 引擎 | L2 夹具 run_fixture | cook 全链路 | package 全链路 |
 |---|---|---|---|
 | UE 5.4.4 | 22/22 | 9/9（695 包/0 error） | Development + Shipping 各 10/10 |
-| UE 5.3.2 | 22/22 | 9/9 | 未跑（`-build` 需 C++ 游戏 target；5.3 夹具宿主为蓝图工程） |
+| UE 5.3.2 | 22/22 | 9/9 | Development + Shipping 各 10/10 |
 
 - 域层跨版本靠多签名 `try` 兜底，`tried` 实测两版一致：`used_by`/`get_dependencies`=`name+opts`；纹理尺寸无直读 API → `blueprint_get_memory_size` + 源盘反推；5.3/5.4 `EditorAssetLibrary.move_asset` 皆 `AttributeMissing` → 走 `rename_asset` 兜底。
 - 夹具生成器坑（已修）：**UE 5.3 的 Interchange 导入忽略 `AssetImportTask.destination_name`**（包名由源文件名决定），复用同一 PNG 造改名基准贴图（`T_CalibRef/Broken/Stub`）在 5.3 建不出来，连带 5 项 refs/copy 校验失败。修法是这些改名基准改走 `EditorAssetLibrary.duplicate_asset`（显式目标名，跨版本稳）→ 5.3/5.4 均回到 22/22。
-- 尚未覆盖：5.3 package（需带 C++ target 的宿主）、更多版本（5.5/5.8 本机未装/未验证）。
+- package 的 C++ 宿主坑（已内化）：`-build` 带 `-nocompileeditor`，cook 阶段用编辑器进程加载工程模块——给 C++ 工程跑 `--mode package` 前须先各编一次 **Editor 与 Game 两个 target**，否则 cook 报 `The game module '<X>' could not be found` 直接失败（蓝图工程无此问题，但蓝图工程又没有 Game target 可 `-build`，故 package 测不了）。本轮 5.3 package 用一次性 C++ 宿主验证通过。
+- 本机覆盖状态：**5.3.2 与 5.4.4 已全绿**（夹具 22/22 + cook 9/9 + package Dev/Shipping 各 10/10）。更多版本（5.5/5.8 等）在其他机器补跑。
 
 ## 工具覆盖矩阵（当前 21 个 MCP 工具）
 
