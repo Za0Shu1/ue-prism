@@ -212,6 +212,24 @@ def run_all(bus_dir, project_dir):
                                   for f in tex.values())
     r.check("report.texture_evidence_upgraded", ok_fields,
             "fields ok" if tex else "no texture_size findings")
+    # P2 get_asset_references 硬/软分类：真机(5.4) 对已知"被材质硬引用"靶断言。
+    # 覆盖 classify_soft 的 real API 路径（hard-only/soft-only 两次 get_referencers）。
+    def call_refs():
+        return r.call("get_asset_references", {
+            "asset_path": F + "/T_CalibRef", "direction": "used_by", "classify_soft": True})
+    rres = call_refs()
+    matd = None
+    for x in rres.get("used_by_detail") or []:
+        if str(x.get("package", "")).endswith("/M_CalibRef"):
+            matd = x
+    has_mat = any(str(p).endswith("/M_CalibRef") for p in rres.get("used_by") or [])
+    ok_refs = (has_mat and matd is not None and matd.get("hard") is True
+               and matd.get("soft") is False
+               and rres.get("used_by_soft_count") == 0)
+    r.check("refs.classify_soft_hard", ok_refs,
+            {"used_by": rres.get("used_by"), "detail": matd,
+             "soft_count": rres.get("used_by_soft_count"), "api": rres.get("api")})
+
     _migrate_rename_roundtrip(r)
     _migrate_move_roundtrip(r)
     matrix = {

@@ -151,14 +151,15 @@ def describe_asset(asset_path: Annotated[str, Field(description="/Game 包路径
         "describe_asset", {"asset_path": asset_path})
 
 
-def get_asset_references(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], direction: Annotated[str, Field(description="uses=依赖它的 | used_by=引用它的 | both=双向")] = "both", recursive: Annotated[bool, Field(description="true=递归展开依赖闭包（深度/节点数有上限）")] = False, limit: Annotated[int, Field(description="每方向返回条数上限")] = 500, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """Reference graph via AssetRegistry: uses(依赖)/used_by(被引用). direction in both|uses|used_by. Needs live bridge."""
+def get_asset_references(asset_path: Annotated[str, Field(description="/Game 包路径，如 /Game/Foo/Bar")], direction: Annotated[str, Field(description="uses=依赖它的 | used_by=引用它的 | both=双向")] = "both", recursive: Annotated[bool, Field(description="true=递归展开依赖闭包（深度/节点数有上限）")] = False, limit: Annotated[int, Field(description="每方向返回条数上限")] = 500, classify_soft: Annotated[bool, Field(description="true=额外用 hard-only/soft-only 两次调用给 *_detail 标注每个引用的硬/软来源（默认关，行为不变）")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """Reference graph via AssetRegistry: uses(依赖)/used_by(被引用). direction in both|uses|used_by. classify_soft 可加标每个引用的硬/软来源. Needs live bridge."""
     bus_dir, _pd, err = _resolve(project)
     if err:
         return err
     return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call(
         "get_asset_references",
-        {"asset_path": asset_path, "direction": direction, "recursive": recursive, "limit": limit},
+        {"asset_path": asset_path, "direction": direction, "recursive": recursive,
+         "limit": limit, "classify_soft": _as_bool(classify_soft, default=False)},
     )
 
 

@@ -82,6 +82,33 @@ def main():
         EAL.save_asset(dest)
         return "CalibMesh (engine cube copy; known 1 material slot)"
     step("calib_mesh", calib_mesh)
+    def calib_ref():
+        """classify_soft 真值靶：新增贴图 T_CalibRef + 材质 M_CalibRef 硬引用它。
+        5.4 headless：MaterialEditingLibrary 建材质可用；材质->贴图为硬 package 引用。"""
+        png = os.path.join(pngs, "T_Used1K.png")
+        if not os.path.isfile(png):
+            raise RuntimeError("missing png for T_CalibRef: " + png)
+        if not _import_png(png, "T_CalibRef"):
+            raise RuntimeError("import T_CalibRef failed")
+        dest = FOLDER + "/M_CalibRef"
+        if EAL.does_asset_exist(dest):
+            EAL.delete_asset(dest)
+        at = unreal.AssetToolsHelpers.get_asset_tools()
+        mat = at.create_asset("M_CalibRef", FOLDER, unreal.Material,
+                              unreal.MaterialFactoryNew())
+        if mat is None:
+            raise RuntimeError("create M_CalibRef failed")
+        tex = unreal.load_asset(FOLDER + "/T_CalibRef")
+        expr = unreal.MaterialEditingLibrary.create_material_expression(
+            mat, unreal.MaterialExpressionTextureSample, -300, 0)
+        expr.set_editor_property("texture", tex)
+        unreal.MaterialEditingLibrary.connect_material_property(
+            expr, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        EAL.save_asset(dest)
+        return "M_CalibRef hard-refs T_CalibRef (classify_soft target)"
+
+    step("calib_ref", calib_ref)
+
     out["assets"] = sorted(str(d.package_name) for d in
                            (unreal.AssetRegistryHelpers.get_asset_registry()
                             .get_assets_by_path(unreal.Name(FOLDER), True) or []))

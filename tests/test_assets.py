@@ -77,3 +77,33 @@ def test_asset_chain_hardening_keys_via_bus(tmp_path):
     for k in ("cycles", "cyclic", "cycles_truncated", "god_assets", "god_scan", "impact_summary"):
         assert k in r
     assert r["cycles"] == [] and r["cyclic"] is False
+
+
+def test_get_asset_references_classify_soft_degrade(tmp_path):
+    """classify_soft=True 时无引擎仍返回稳定结构键（不假装成功，也不缺键）。"""
+    bdir = str(tmp_path / "bus")
+    _bridge(bdir)
+    env = bus.BusClient(bdir, timeout=5).call(
+        "get_asset_references",
+        {"asset_path": "/Game/Foo/Bar.Bar", "direction": "used_by", "classify_soft": True},
+    )
+    assert env["ok"] is True
+    r = env["result"]
+    assert r["classify_soft"] is True
+    assert set(["used_by_detail", "uses_detail", "used_by_soft_count", "uses_soft_count"]).issubset(r.keys())
+    assert r["used_by_detail"] == [] and r["used_by_soft_count"] == 0
+
+
+def test_merge_detail_hard_soft_union():
+    from prism.domain import assets
+    hard = {"/Game/A", "/Game/B"}
+    soft = {"/Game/B", "/Game/C"}
+    d = assets._merge_detail(hard, soft, limit=10)
+    byp = {x["package"]: x for x in d}
+    assert byp["/Game/A"] == {"package": "/Game/A", "hard": True, "soft": False}
+    assert byp["/Game/B"]["hard"] is True and byp["/Game/B"]["soft"] is True
+    assert byp["/Game/C"] == {"package": "/Game/C", "hard": False, "soft": True}
+    assert [x["package"] for x in d] == ["/Game/A", "/Game/B", "/Game/C"]
+    assert assets._merge_detail(hard, soft, limit=1) == [{"package": "/Game/A", "hard": True, "soft": False}]
+    assert assets._merge_detail(None, None, 10) == []
+

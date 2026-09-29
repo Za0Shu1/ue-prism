@@ -164,22 +164,68 @@ def describe_asset(asset_path):
     return result
 
 
-def _dep_options(unreal):
-    """构造 AssetRegistryDependencyOptions 并开启各类引用位；不支持则返回 None。"""
+_ALL_INCLUDE = ("hard", "soft", "mgmt", "search")
+
+
+def _dep_options(unreal, include=_ALL_INCLUDE):
+    """构造 AssetRegistryDependencyOptions，按 include 集合开启对应引用位。
+
+    include 为 ("hard","soft","mgmt","search") 的子集；默认全开（与旧行为一致）。
+    只开 hard 得到硬引用集合，只开 soft 得到软引用集合，供分类。不支持则返回 None。"""
     try:
         o = unreal.AssetRegistryDependencyOptions()
     except Exception:
         return None
-    for f in (
-        "include_hard_package_references", "include_soft_package_references",
-        "include_hard_management_references", "include_soft_management_references",
-        "include_searchable_names",
-    ):
+    flags = {
+        "include_hard_package_references": "hard" in include,
+        "include_soft_package_references": "soft" in include,
+        "include_hard_management_references": "mgmt" in include,
+        "include_soft_management_references": "mgmt" in include,
+        "include_searchable_names": "search" in include,
+    }
+    for f, v in flags.items():
         try:
-            o.set_editor_property(f, True)
+            o.set_editor_property(f, v)
         except Exception:
             pass
     return o
+
+
+def _ref_variant(ar, unreal, method, package, include):
+    """用指定引用位组合做一次 get_referencers/get_dependencies；返回 (set[str]|None, sig)。
+
+    仅尝试带 options 的签名（分类必须靠 options 过滤）；拿不到返回 (None, reason)。"""
+    fn = getattr(ar, method, None)
+    if fn is None:
+        return None, method + "_absent"
+    opts = _dep_options(unreal, include)
+    if opts is None:
+        return None, "options_unavailable"
+    name = unreal.Name(package)
+    for call, sig in ((lambda: fn(name, opts), "name+opts"),
+                      (lambda: fn([name], opts), "[name]+opts")):
+        try:
+            out = call()
+        except Exception:
+            continue
+        if out is None:
+            continue
+        try:
+            return set(_name_str(x) for x in out), sig
+        except Exception:
+            continue
+    return None, "sig_unmatched"
+
+
+def _merge_detail(hard, soft, limit):
+    """hard/soft 两个包名集合 -> [{package, hard, soft}]（并集、排序、截到 limit）。
+
+    None 视作空集；任一 variant 不可用返回的也是空集，detail 相应为空并在 api 里记 reason。"""
+    hard = hard or set()
+    soft = soft or set()
+    union = sorted(hard | soft)
+    return [{"package": p, "hard": p in hard, "soft": p in soft}
+            for p in union[:limit]]
 
 
 def _registry_graph(ar, unreal, method, package, recursive):
@@ -213,18 +259,23 @@ def _registry_graph(ar, unreal, method, package, recursive):
 
 
 @register
-def get_asset_references(asset_path, direction="both", recursive=False, limit=500):
+def get_asset_references(asset_path, direction="both", recursive=False, limit=500, classify_soft=False):
     direction = (direction or "both").lower()
     if direction not in ("both", "uses", "used_by"):
         direction = "both"
     if isinstance(recursive, str):
         recursive = recursive.strip().lower() in ("1", "true", "yes")
+    if isinstance(classify_soft, str):
+        classify_soft = classify_soft.strip().lower() in ("1", "true", "yes")
     limit = int(limit)
     package, object_path, _leaf = _normalize(asset_path)
     result = {
         "query": asset_path, "package_name": package, "direction": direction,
         "recursive": bool(recursive), "found": False, "used_by": [], "uses": [],
         "truncated": False, "cap": limit,
+        "classify_soft": bool(classify_soft),
+        "used_by_detail": [], "uses_detail": [],
+        "used_by_soft_count": 0, "uses_soft_count": 0,
     }
     try:
         import unreal
@@ -256,6 +307,21 @@ def get_asset_references(asset_path, direction="both", recursive=False, limit=50
     result["uses_total"] = len(result["uses"])
     result["used_by_total"] = len(result["used_by"])
     result["truncated"] = (result["uses_total"] >= limit) or (result["used_by_total"] >= limit)
+    # 硬/软分类（可选）：对每个方向各调 hard-only 与 soft-only，按包并集标注来源。
+    # 注意：searchable/mgmt 引用不计入 detail（只覆盖 package 级硬/软）。
+    if classify_soft:
+        if direction in ("used_by", "both"):
+            hard, hs = _ref_variant(ar, unreal, "get_referencers", package, ("hard",))
+            soft, ss = _ref_variant(ar, unreal, "get_referencers", package, ("soft",))
+            result["used_by_detail"] = _merge_detail(hard, soft, limit)
+            result["used_by_soft_count"] = len(soft or set())
+            used_sig["used_by_classify"] = [hs, ss]
+        if direction in ("uses", "both"):
+            hard, hd = _ref_variant(ar, unreal, "get_dependencies", package, ("hard",))
+            soft, sd = _ref_variant(ar, unreal, "get_dependencies", package, ("soft",))
+            result["uses_detail"] = _merge_detail(hard, soft, limit)
+            result["uses_soft_count"] = len(soft or set())
+            used_sig["uses_classify"] = [hd, sd]
     result["api"] = used_sig
     # 请求的每个方向都无一签名命中：能力完全失效 → 报 UE_API_MISMATCH，不返回空表装ok
     if used_sig and all(s is None for s in used_sig.values()):
