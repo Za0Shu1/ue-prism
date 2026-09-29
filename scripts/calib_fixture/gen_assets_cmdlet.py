@@ -140,6 +140,42 @@ def main():
 
     step("calib_broken", calib_broken)
 
+    def calib_stub():
+        """fix_broken_references 真机写靶：M_CalibStub 硬引用 T_CalibStub，随后把贴图 rename_asset
+        改名走 -> M_CalibStub 仍 import 旧路径。5.4 python 实证：rename_asset 不生成可持久化的
+        ObjectRedirector 桩(旧路径直接消失)，故该靶实为「改名未留桩」型 missing 悬空引用——
+        用于验证 fix 的双钥写执行 + 可修复(redirector)/不可修复(missing)路由。
+        redirector 自动修复的正样本无头不可靠生成 -> 记 L3(其路由逻辑已由 L0 覆盖)。"""
+        png = os.path.join(pngs, "T_Used1K.png")
+        if not os.path.isfile(png):
+            raise RuntimeError("missing png for T_CalibStub: " + png)
+        for nm in ("M_CalibStub", "T_CalibStub", "T_CalibStubMoved"):
+            if EAL.does_asset_exist(FOLDER + "/" + nm):
+                EAL.delete_asset(FOLDER + "/" + nm)
+        if not _import_png(png, "T_CalibStub"):
+            raise RuntimeError("import T_CalibStub failed")
+        at = unreal.AssetToolsHelpers.get_asset_tools()
+        mat = at.create_asset("M_CalibStub", FOLDER, unreal.Material,
+                              unreal.MaterialFactoryNew())
+        if mat is None:
+            raise RuntimeError("create M_CalibStub failed")
+        tex = unreal.load_asset(FOLDER + "/T_CalibStub")
+        expr = unreal.MaterialEditingLibrary.create_material_expression(
+            mat, unreal.MaterialExpressionTextureSample, -300, 0)
+        expr.set_editor_property("texture", tex)
+        unreal.MaterialEditingLibrary.connect_material_property(
+            expr, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        EAL.save_asset(FOLDER + "/M_CalibStub")
+        rn = EAL.rename_asset(FOLDER + "/T_CalibStub", FOLDER + "/T_CalibStubMoved")
+        EAL.save_asset(FOLDER + "/T_CalibStubMoved")
+        if EAL.does_asset_exist(FOLDER + "/T_CalibStub"):
+            EAL.save_asset(FOLDER + "/T_CalibStub")
+        return {"renamed": bool(rn),
+                "stub_exists": EAL.does_asset_exist(FOLDER + "/T_CalibStub"),
+                "expect": "M_CalibStub -> redirector-backed broken dep /Game/PrismCalib/T_CalibStub"}
+
+    step("calib_stub", calib_stub)
+
     out["assets"] = sorted(str(d.package_name) for d in
                            (unreal.AssetRegistryHelpers.get_asset_registry()
                             .get_assets_by_path(unreal.Name(FOLDER), True) or []))

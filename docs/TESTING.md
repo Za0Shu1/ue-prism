@@ -9,7 +9,7 @@
 |---|---|---|---|
 | **L0 离线套件** | 无引擎，Python>=3.10 | `python -m pytest` | 协议/信封/总线/规则纯逻辑/降级结构契约。改任何层必跑 |
 | **L1 桥冒烟** | 编辑器在线 | `python scripts/verify_connection.py`；`python scripts/bus_call.py <bus_dir> ping` | 心跳、往返、UE 版本 |
-| **L2 校准夹具** | 任意 UE5 工程装好桥插件 | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 18 项校验（含写路径 rename/move 内存态自还原往返，见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
+| **L2 校准夹具** | 任意 UE5 工程装好桥插件 | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 20 项校验（含写路径 rename/move 内存态自还原往返，见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
 | **L3 真实工程抽样** | 客户的真实大工程 | 人工驱动 MCP 工具 + 抽检 | 假阳性率、大闭包耗时、阈值手感 |
 
 ## L2 校准夹具：资产真值表
@@ -27,6 +27,7 @@
 | 写路径靶（复用 `T_CalibCube`/`T_Used1K`） | 改名/移动往返（内存态，自还原，不落盘） | `migrate_asset_rename` 走 `rename_asset` 候选链 + 注册表核对旧消失/新存在/还原；`migrate_asset_move` 实证 5.4 无 `move_asset`，`AttributeMissing` 后走 `rename_asset` 全路径兜底（固化该真机分支） |
 | `M_CalibRef` → `T_CalibRef` | 材质硬引用贴图（`TextureSample`→BaseColor） | `get_asset_references` `classify_soft=True`：`T_CalibRef` 的 used_by 中 `M_CalibRef` 判为 `hard=True/soft=False`、`used_by_soft_count=0`（软引用正样本待 L3——5.4 无头 python 无稳定造 SoftObjectProperty 资产的途径） |
 | `M_CalibBroken` → `T_CalibBroken`（生成材质后删贴图） | 材质 import 表仍记录已删包 = 悬空硬引用 | `scan_broken_references` 判 `missing`（`get_dependencies` name+opts 仍返回该路径，注册表解析不到）；同批健康靶 `T_CalibRef` 不误报（假阳性负控） |
+| `M_CalibStub` → `T_CalibStub`（改名未留桩） | `rename_asset` 后旧路径直接消失（5.4 python 不生成可持久化 ObjectRedirector，日志实证 `VerifyImport: Failed to load package`） | `fix_broken_references` 真机写契约：dry_run 把该靶路由进 `unfixable_missing`（非 `fixable_redirectors`）、confirm 双钥落盘不崩（`executed=True`）。redirector 自动修复正样本无头不可靠生成 → 记 L3（路由逻辑已由 L0 覆盖） |
 
 执行细节（5.4 真机实证，跨版本脚本已内置兜底）：
 - **commandlet 只能做资产**（import/duplicate 贴图）；`new_level`、关卡编辑、TextureCube 复制在
@@ -35,7 +36,7 @@
   bus 在主线程 tick 内处理、sleep 无效）；热态直读又可能是 **MaxSize 限幅后的有效尺寸**。
   因此度量层固定三分口径：`width`（现状）、`source_width`（源反推，规则判据）、`effective_width`（限幅后）。
 
-## 工具覆盖矩阵（当前 20 个 MCP 工具）
+## 工具覆盖矩阵（当前 21 个 MCP 工具）
 
 | 工具 | L0 离线用例 | L2 夹具 checks | 仍欠（L3 真实工程） |
 |---|---|---|---|
@@ -43,6 +44,7 @@
 | `list_projects` / `list_perf_rules` | test_registry / test_rules | -（随 report 间接） | - |
 | `describe_asset` / `get_asset_references`（classify_soft 硬/软区分） | test_assets(+2 用例:classify_soft 降级稳定键/_merge_detail 并集) / test_pr05_contract | refs.classify_soft_hard（硬引用真值靶 `M_CalibRef`→`T_CalibRef`） | 大引用面性能；软引用正样本抽检 |
 | `scan_broken_references`（悬空/坏引用检测） | test_assets(+2 用例:降级结构键常驻/_dep_resolution_status 三态) | refs.broken_missing_target（已知 missing 靶 M_CalibBroken→T_CalibBroken + 健康靶负控） | 真实工程重定向桩(redirector)修复闭环、软引用漏检面（L3） |
+| `fix_broken_references`（写·双钥） | test_migrate(+4 用例:双钥守卫/无引擎降级[读+写]/dry_run fixable-missing 路由) | refs.fix_plan_routing（真机路由 stub 靶进 missing） / refs.fix_write_honest（confirm 落盘 executed 不崩、诚实回报） | redirector 桩自动修复正样本（5.4 python 不留桩 → L3）；missing 需人工 VCS 还原/重指向 |
 | `get_asset_chain`（环/god/影响半径） | test_assets(+SCC 纯逻辑) / test_buscall | -（小图 smoke） | 真实大工程的大闭包耗时、god_min_refs 阈值手感 |
 | `scan_orphan_assets` | test_orphan_degrade | orphan.targets_found / map_not_orphaned | 真实工程假阳性抽检 >=20 条 |
 | `get_asset_metrics`（真大/假大+材质槽） | test_metrics_degrade / test_metrics_runtime | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat / mesh_material_slots | 真实美术资产压缩格式下 est 口径偏差；碰撞面数 5.4 `UStaticMesh` python 无访问器（绑定限制，见资产表 CalibMesh 行）|

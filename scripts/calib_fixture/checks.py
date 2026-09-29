@@ -248,6 +248,33 @@ def run_all(bus_dir, project_dir):
              "assets_with_broken": bres.get("assets_with_broken"),
              "total_scanned": bres.get("total_scanned"), "api": bres.get("api")})
 
+    # P2 fix_broken_references：真机写契约——对 M_CalibStub 悬空靶验证 dry_run 路由(fixable/missing) + confirm 双钥落盘不崩。
+    def call_fixplan():
+        return r.call("fix_broken_references", {
+            "asset_paths": [F + "/M_CalibStub"], "dry_run": True, "limit": 50})
+    fp = call_fixplan()
+    fixpk = [str(x.get("package", "")) for x in (fp.get("fixable_redirectors") or [])]
+    misspk = [str(x.get("package", "")) for x in (fp.get("unfixable_missing") or [])]
+    stub_redirector = any(d.endswith("/T_CalibStub") for d in fixpk)
+    stub_missing = any(d.endswith("/T_CalibStub") for d in misspk)
+    r.check("refs.fix_plan_routing",
+            fp.get("found_registry") is True and (stub_redirector or stub_missing),
+            {"fixable": fixpk[:6], "missing": misspk[:6],
+             "would_fix_count": fp.get("would_fix_count"),
+             "as": ("redirector" if stub_redirector else "missing")})
+
+    def call_fixwrite():
+        return r.call("fix_broken_references", {
+            "asset_paths": [F + "/M_CalibStub"], "dry_run": False, "confirm": True, "limit": 50})
+    fw = call_fixwrite()
+    ok_write = (fw.get("found_registry") is True and fw.get("executed") is True
+                and isinstance(fw.get("success"), bool)
+                and isinstance(fw.get("attempted_fix"), int))
+    r.check("refs.fix_write_honest", ok_write,
+            {"executed": fw.get("executed"), "attempted_fix": fw.get("attempted_fix"),
+             "confirmed_fixed": fw.get("confirmed_fixed"), "success": fw.get("success"),
+             "results": (fw.get("results") or [])[:4]})
+
     _migrate_rename_roundtrip(r)
     _migrate_move_roundtrip(r)
     matrix = {

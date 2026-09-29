@@ -336,3 +336,105 @@ def migrate_asset(asset_path, dest_path, new_name=None, dry_run=True, confirm=Fa
                  "duplicated": ok_n, "of": len(plan_items), "results": results[:80],
                  "note": "复制完成，原件未改动。副本引用为 UE duplicate 默认(可能与原件共享依赖)；A 阶段先保证安全落盘。"})
     return envelope.make_ok(base)
+
+
+@register
+def fix_broken_references(folder="/Game", asset_paths=None, dry_run=True, confirm=False, limit=200):
+    """修复悬空引用中的『可安全自动修复』子集：引用目标只剩重定向桩(ObjectRedirector)者，
+    逐个调 fix_up_redirectors 把引用者直接指向桩的目标资产、清掉旧桩。
+
+    missing(目标已彻底不在注册表，如硬删/坏路径)不可自动修 -> 只列出不碰(需 VCS 还原或人工重指向)。
+    默认 dry_run 只出计划；dry_run=False 且 confirm=True 才落盘(双钥)。
+    5.4 python 若未绑定 fix_up_redirectors -> 诚实报 attempted 但未确认(编辑器手动兜底)，绝不假装 success。
+    无引擎(总线降级)返回 executed=False + note=no_engine。改动在内存，需自行保存/提交 VCS。
+    """
+    if isinstance(dry_run, str):
+        dry_run = dry_run.strip().lower() in ("1", "true", "yes")
+    if isinstance(confirm, str):
+        confirm = confirm.strip().lower() in ("1", "true", "yes")
+    if not dry_run and not confirm:
+        return envelope.make_err(envelope.Code.RUNTIME_ERROR,
+                                 "fix_broken_references 是写操作：需 dry_run=False 且 confirm=True（双钥）")
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 200
+    scan = _a.scan_broken_references(asset_paths=asset_paths or [], folder=folder, limit=limit)
+    if isinstance(scan, dict) and scan.get("ok") is False:
+        return scan  # 透传 UE_API_MISMATCH 等结构化错误
+    base = {
+        "op": "fix_broken_references", "scope": scan.get("scope"),
+        "found_registry": bool(scan.get("found_registry")),
+        "missing_total": int(scan.get("missing_count") or 0),
+        "redirector_total": int(scan.get("redirector_count") or 0),
+        "fixable_redirectors": [], "fixable_truncated": False,
+        "unfixable_missing": [], "missing_truncated": False,
+    }
+    if not scan.get("found_registry"):
+        base.update({"dry_run": bool(dry_run), "executed": False, "success": False,
+                     "note": "no_engine: 需编辑器在线(桥)才能修复悬空引用。"})
+        return envelope.make_ok(base)
+
+    fixable, missing = [], []
+    for row in scan.get("by_dep") or []:
+        item = {"package": row.get("dep"),
+                "referenced_by_count": int(row.get("referenced_by_count") or 0),
+                "referenced_by": (row.get("referenced_by") or [])[:10]}
+        if row.get("kind") == "redirector":
+            fixable.append(item)
+        elif row.get("kind") == "missing":
+            missing.append(item)
+    fixable.sort(key=lambda r: (-r["referenced_by_count"], str(r["package"])))
+    missing.sort(key=lambda r: (-r["referenced_by_count"], str(r["package"])))
+    base["fixable_redirectors"] = fixable[:40]
+    base["fixable_truncated"] = len(fixable) > 40
+    base["unfixable_missing"] = missing[:40]
+    base["missing_truncated"] = len(missing) > 40
+
+    if dry_run:
+        base.update({"dry_run": True, "executed": False,
+                     "would_fix_count": len(fixable), "would_skip_missing": len(missing),
+                     "note": ("dry-run 计划。fixable 者(只剩重定向桩)将逐个调 fix_up_redirectors "
+                              "把引用者直接指向桩目标；missing 者(目标已彻底不在)不可自动修，"
+                              "需从 VCS 还原或人工重指向。确认无误带 dry_run=False+confirm=True 执行。")})
+        return envelope.make_ok(base)
+
+    try:
+        import unreal
+    except Exception:
+        base.update({"dry_run": False, "executed": False, "success": False, "note": "no_engine"})
+        return envelope.make_ok(base)
+
+    results = []
+    fixed = 0
+    for item in fixable:
+        pkg = str(item["package"])
+        leaf = pkg.rpartition("/")[2]
+        sub = _fixup_redirectors(unreal, pkg, leaf)
+        entry = {"redirector": pkg, "referenced_by_count": item["referenced_by_count"],
+                 "attempted": bool(sub.get("attempted")), "ok": bool(sub.get("ok"))}
+        for k in ("api", "note"):
+            if sub.get(k):
+                entry[k] = sub.get(k)
+        if sub.get("tried"):
+            entry["tried"] = sub.get("tried")[:6]
+        results.append(entry)
+        if sub.get("ok"):
+            fixed += 1
+
+    base.update({
+        "dry_run": False, "executed": True,
+        "success": (fixed == len(fixable) and fixed > 0) if fixable else False,
+        "attempted_fix": len(fixable), "confirmed_fixed": fixed,
+        "would_skip_missing": len(missing),
+        "results": results[:60], "results_truncated": len(results) > 60,
+    })
+    if not fixable:
+        base["note"] = "未发现可自动修复的重定向桩(missing 需人工)。无写操作发生。"
+    elif fixed == 0:
+        base["note"] = ("已尝试 fix_up_redirectors 但未确认成功(多为 5.4 python 未绑定该 API)。"
+                        "请在编辑器 Content Browser 对相关目录手动 Fix Up Redirectors 兜底。")
+    else:
+        base["note"] = ("已修复 %d/%d 个桩，引用者现直接指向目标。改动在内存，需自行保存/提交 VCS "
+                        "并用 scan_broken_references 复跑核对。" % (fixed, len(fixable)))
+    return envelope.make_ok(base)

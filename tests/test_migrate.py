@@ -229,3 +229,50 @@ def test_dup_result_success_detection():
         def get_path_name(self):
             raise RuntimeError("x")
     assert M._dup_result(_Bad())[0] is True
+
+
+# ---- fix_broken_references（写操作·双钥）----
+
+def test_domain_fix_requires_double_key():
+    env = migrate.fix_broken_references(folder="/Game/P", dry_run=False, confirm=False)
+    assert env["ok"] is False and env["error"]["code"] == "RUNTIME_ERROR" and "confirm" in env["error"]["message"]
+
+
+def test_domain_fix_no_engine_dryrun_degrade():
+    # 默认 dry_run：无 unreal -> scan 无注册表 -> executed=False，绝不假装修好
+    env = migrate.fix_broken_references(folder="/Game/P")
+    assert env["ok"] is True
+    r = env["result"]
+    assert r["executed"] is False and r["found_registry"] is False
+    assert str(r["note"]).startswith("no_engine")
+
+
+def test_domain_fix_no_engine_write_degrade():
+    # 双钥通过但无 unreal：仍降级 executed=False（写不落地），不假装成功
+    env = migrate.fix_broken_references(folder="/Game/P", dry_run=False, confirm=True)
+    assert env["ok"] is True
+    r = env["result"]
+    assert r["executed"] is False and r["found_registry"] is False
+
+
+def test_domain_fix_dryrun_splits_redirector_missing(monkeypatch):
+    from prism.domain import assets as A
+    fake = {
+        "found_registry": True, "scope": "folder:/Game/P",
+        "missing_count": 1, "redirector_count": 1,
+        "by_dep": [
+            {"dep": "/Game/P/Stub", "kind": "redirector", "referenced_by_count": 3,
+             "referenced_by": ["/Game/P/A1", "/Game/P/A2", "/Game/P/A3"]},
+            {"dep": "/Game/P/Gone", "kind": "missing", "referenced_by_count": 1,
+             "referenced_by": ["/Game/P/A9"]},
+        ],
+    }
+    monkeypatch.setattr(A, "scan_broken_references", lambda **kw: fake)
+    env = migrate.fix_broken_references(folder="/Game/P", dry_run=True)
+    assert env["ok"] is True
+    r = env["result"]
+    assert r["dry_run"] is True and r["executed"] is False
+    assert r["would_fix_count"] == 1 and r["would_skip_missing"] == 1
+    assert r["fixable_redirectors"][0]["package"] == "/Game/P/Stub"
+    assert r["unfixable_missing"][0]["package"] == "/Game/P/Gone"
+    assert r["redirector_total"] == 1 and r["missing_total"] == 1

@@ -592,6 +592,25 @@ def migrate_asset(asset_path: Annotated[str, Field(description="/Game 包路径�
         {"asset_path": asset_path, "dest_path": dest_path, "new_name": new_name, "dry_run": dry_run, "confirm": confirm})
 
 
+def fix_broken_references(folder: Annotated[str, Field(description="扫描/修复范围，Content 下目录前缀（默认 /Game）")] = "/Game", asset_paths: Annotated[str, Field(description="只修这些资产的坏引用（逗号/分号/换行分隔；填了则忽略 folder）")] = "", dry_run: Annotated[bool, Field(description="默认 true=只回修复计划，不落盘")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥（写操作契约）")] = False, limit: Annotated[int, Field(description="本窗口最多扫描多少资产")] = 200, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """修复悬空引用中『可安全自动修复』的子集：目标只剩重定向桩(redirector)者调 fix_up_redirectors 把引用者直接指向目标；
+    missing(目标已彻底不在)只列出不碰。默认 dry_run 出计划，双钥(dry_run=False+confirm=True)才落盘。Needs live bridge.
+    注：5.4 python 若未绑定 fix_up_redirectors，会诚实报 attempted 但未确认，需编辑器手动兜底，不假装成功。"""
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    try:
+        dry_run = _as_bool(dry_run, default=True)
+        confirm = _as_bool(confirm, default=False)
+    except ValueError as e:
+        return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e))
+    paths = [x.strip() for x in re.split(r"[,;\n]+", asset_paths or "") if x.strip()]
+    return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call(
+        "fix_broken_references",
+        {"folder": folder, "asset_paths": paths, "dry_run": dry_run,
+         "confirm": confirm, "limit": int(limit)})
+
+
 _TOOLS = (
     ping, list_level_actors, describe_asset, get_asset_references, get_asset_metrics,
     get_asset_chain, scan_orphan_assets, scan_broken_references,
@@ -599,6 +618,7 @@ _TOOLS = (
     cook_package, get_cook_status, attribute_cook_errors,
     get_perf_report, list_perf_rules,
     list_projects, preview_asset_migration, migrate_asset_rename, migrate_asset_move, migrate_asset,
+    fix_broken_references,
 )
 
 
