@@ -479,3 +479,27 @@ def test_run_report_carries_roi_summary(tmp_path):
     f = rep["findings"][0]
     assert f["rule_id"] == "asset_size_top" and f["roi"]["unit"] == "memory_or_disk_mb"
     assert isinstance(rep["roi_summary"]["by_effort"]["mid"], int)
+
+# ---- vs-上次回归 diff ----
+
+def test_report_diff_vs_previous(tmp_path):
+    proj = _proj(tmp_path, toml=TOML)
+    b = _bus(tmp_path)
+    rep1 = rules.run_report(proj, b, snapshot=True, stamp="s1")
+    assert rep1["diff"]["available"] is False
+    assert rep1["snapshot_saved"] == "report_s1.json"
+    assert rep1["summary"]["error"] == 1
+    os.remove(os.path.join(proj, "Content", "Bad", "Big.uasset"))   # 触发 finding 的大资产没了
+    rep2 = rules.run_report(proj, b, snapshot=True, stamp="s2")
+    d = rep2["diff"]
+    assert d["available"] is True and d["vs_stamp"] == "s1"
+    assert d["removed_count"] == 1 and d["removed"][0]["rule_id"] == "asset_size_top"
+    assert d["error_delta"] == -1
+
+
+def test_report_snapshot_disabled(tmp_path):
+    proj = _proj(tmp_path, toml=TOML)
+    b = _bus(tmp_path)
+    rep = rules.run_report(proj, b, snapshot=False)
+    assert rep["diff"]["available"] is False and rep["snapshot_saved"] is None
+    assert not os.path.isdir(os.path.join(b, "reports"))

@@ -371,12 +371,13 @@ def attribute_cook_errors(task_id: Annotated[str | None, Field(description="cook
 
 # ---------------- 性能规则 ----------------
 
-def get_perf_report(scope: Annotated[str, Field(description="必须是 Content 下真实存在的文件夹（/Game 前缀可省）；无效值直接报错不出残缺报告")] = "/Game", target: Annotated[str | None, Field(description="pc|console|mobile；缺省读 prism.toml 否则 pc")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None, recent_tasks: Annotated[int, Field(description="cook 类规则只审计最近 N 个成功 cook/package 档案（陈旧证据自动过期）；0=全部历史供取证")] = rules.DEFAULT_RECENT_TASKS, cap: Annotated[int, Field(description="返回 finding 上限（error 优先已排序）；<=0=全部返回")] = rules.DEFAULT_CAP, sample_size: Annotated[int, Field(description="bridge 规则度量最大的前 N 个大资产（0=扫描宇宙全量，慎用内存）；越大覆盖越全越慢")] = rules.DEFAULT_SAMPLE):
+def get_perf_report(scope: Annotated[str, Field(description="必须是 Content 下真实存在的文件夹（/Game 前缀可省）；无效值直接报错不出残缺报告")] = "/Game", target: Annotated[str | None, Field(description="pc|console|mobile；缺省读 prism.toml 否则 pc")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None, recent_tasks: Annotated[int, Field(description="cook 类规则只审计最近 N 个成功 cook/package 档案（陈旧证据自动过期）；0=全部历史供取证")] = rules.DEFAULT_RECENT_TASKS, cap: Annotated[int, Field(description="返回 finding 上限（error 优先已排序）；<=0=全部返回")] = rules.DEFAULT_CAP, sample_size: Annotated[int, Field(description="bridge 规则度量最大的前 N 个大资产（0=扫描宇宙全量，慎用内存）；越大覆盖越全越慢")] = rules.DEFAULT_SAMPLE, snapshot: Annotated[bool, Field(description="true(默认)=本次报告落一份快照到 <bus>/reports/ 并与上次比较返回 diff 回归对比；false=只出不写快照")] = True):
     """Static performance audit from the offline rule pack (v0.3 PR-A).
 
     Reads disk + cook task archives only; findings carry rule_id/severity/subject/
     evidence/threshold/advice + roi(unit/benefit/effort/rationale)，sorted error>warn, capped
     by total/truncated/cap；顶层 roi_summary 汇总体量收益(MB)/按成本分档/正确性计数，供排优先级。
+    snapshot=True 时返回 diff(vs 上次快照的新增/移除/严重度变化 + error/warn/体量MB 增量)；首跑无基线 diff.available=False。
     Bridge-channel rules join when the editor is live; offline yields a half report.
 
     采样可控：bridge 规则默认只度量最大的 80 个资产（sample_size=80），在万级资产工程上
@@ -399,7 +400,8 @@ def get_perf_report(scope: Annotated[str, Field(description="必须是 Content �
     try:
         return envelope.make_ok(rules.run_report(pd, bus_dir, scope=scope, target=target,
                                                  recent_tasks=recent_tasks, cap=cap,
-                                                 sample_size=sample_size))
+                                                 sample_size=sample_size,
+                                                 snapshot=_as_bool(snapshot, default=True)))
     except ValueError as e:
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e))
     except Exception as e:

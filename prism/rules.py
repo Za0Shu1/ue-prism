@@ -500,8 +500,100 @@ def annotate_roi(findings):
     return summary
 
 
+# ---- vs-上次回归 diff（快照落 <bus_dir>/reports/，读上一份 latest.json 比较）----
+import json as _json
+import time as _time
+
+
+def _reports_dir(bus_dir):
+    return os.path.join(str(bus_dir), "reports")
+
+
+def _snap_stamp(stamp=None):
+    if stamp:
+        return str(stamp)
+    return "%s_%d" % (_time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime()),
+                      int(_time.time() * 1000) % 1000)
+
+
+def _finding_key(f):
+    return "%s::%s" % (f.get("rule_id"), f.get("subject"))
+
+
+def _fingerprints(findings):
+    out = {}
+    for f in findings:
+        out[_finding_key(f)] = f.get("severity")
+    return out
+
+
+def _prev_snapshot(reports_dir):
+    lp = os.path.join(reports_dir, "latest.json")
+    try:
+        with open(lp, "r", encoding="utf-8") as fh:
+            return _json.load(fh)
+    except Exception:
+        return None
+
+
+def _write_snapshot(reports_dir, snap):
+    try:
+        os.makedirs(reports_dir, exist_ok=True)
+        fn = "report_%s.json" % snap["stamp"]
+        with open(os.path.join(reports_dir, fn), "w", encoding="utf-8") as fh:
+            _json.dump(snap, fh, ensure_ascii=False)
+        with open(os.path.join(reports_dir, "latest.json"), "w", encoding="utf-8") as fh:
+            _json.dump(snap, fh, ensure_ascii=False)
+        return fn
+    except Exception:
+        return None
+
+
+def _split_key(k):
+    rid, _sep, subj = k.partition("::")
+    return {"rule_id": rid, "subject": subj}
+
+
+def _d(a, b):
+    try:
+        return round(float(a) - float(b), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_diff(prev, findings, roi_summary, summary):
+    if not prev:
+        return {"available": False,
+                "note": "无上次快照(首次运行或历史被清)：本次已作为基线存下，下次起可 diff。"}
+    prev_fp = prev.get("fingerprints") or {}
+    cur_fp = _fingerprints(findings)
+    prev_keys, cur_keys = set(prev_fp), set(cur_fp)
+    added = []
+    for k in sorted(cur_keys - prev_keys):
+        d = _split_key(k); d["severity"] = cur_fp[k]; added.append(d)
+    removed = []
+    for k in sorted(prev_keys - cur_keys):
+        d = _split_key(k); d["severity"] = prev_fp[k]; removed.append(d)
+    changed = []
+    for k in sorted(cur_keys & prev_keys):
+        if prev_fp[k] != cur_fp[k]:
+            d = _split_key(k); d.update({"from": prev_fp[k], "to": cur_fp[k]}); changed.append(d)
+    prev_sum = prev.get("summary") or {}
+    prev_roi = prev.get("roi_summary") or {}
+    return {
+        "available": True, "vs_stamp": prev.get("stamp"), "vs_ts": prev.get("ts"),
+        "added": added[:50], "added_count": len(added),
+        "removed": removed[:50], "removed_count": len(removed),
+        "severity_changed": changed[:50], "severity_changed_count": len(changed),
+        "error_delta": _d(summary.get("error"), prev_sum.get("error")),
+        "warn_delta": _d(summary.get("warn"), prev_sum.get("warn")),
+        "total_benefit_mb_delta": _d(roi_summary.get("total_benefit_mb"), prev_roi.get("total_benefit_mb")),
+    }
+
+
 def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP,
-               recent_tasks=DEFAULT_RECENT_TASKS, sample_size=DEFAULT_SAMPLE):
+               recent_tasks=DEFAULT_RECENT_TASKS, sample_size=DEFAULT_SAMPLE,
+               snapshot=True, stamp=None):
     profile, used_target = load_profile(project_dir, target)
     # scope 必须映射到 Content 下真实存在的目录：无效 scope 直接报错，拒绝静默跳规则出"看似干净"的残缺报告
     scope = str(scope or "/Game").strip() or "/Game"
@@ -552,6 +644,23 @@ def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP
     summary = {"error": sum(1 for x in findings if x["severity"] == "error"),
                "warn": sum(1 for x in findings if x["severity"] == "warn"),
                "skipped_rules": skipped}
+    cur_fp = _fingerprints(findings)
+    if bool(snapshot):
+        _rd = _reports_dir(bus_dir)
+        prev = _prev_snapshot(_rd)
+        diff = _compute_diff(prev, findings, roi_summary, summary)
+        snap = {"stamp": _snap_stamp(stamp), "ts": _time.time(),
+                "profile": used_target, "scope": scope,
+                "summary": {"error": summary["error"], "warn": summary["warn"]},
+                "roi_summary": {"total_benefit_mb": roi_summary["total_benefit_mb"],
+                                "by_effort": roi_summary["by_effort"],
+                                "correctness": roi_summary["correctness"],
+                                "actionable_size": roi_summary["actionable_size"]},
+                "fingerprints": cur_fp}
+        snap_saved = _write_snapshot(_rd, snap)
+    else:
+        diff = {"available": False, "note": "snapshot 关闭(snapshot=False)，无法做 vs-上次回归对比。"}
+        snap_saved = None
     returned = findings if cap <= 0 else findings[:cap]
     returned_errors = sum(1 for x in returned if x["severity"] == "error")
     scan_meta = ctx.get("scan") or {}
@@ -574,6 +683,8 @@ def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP
         "note": note,
         "summary": summary,
         "roi_summary": roi_summary,
+        "diff": diff,
+        "snapshot_saved": snap_saved,
         "runtime_size_downgraded": runtime_downgraded,
         "sampling": {"sample_size": sample_size, "scan_universe": universe,
                      "scan_universe_truncated": scan_trunc, "measured": measured,
