@@ -375,7 +375,8 @@ def get_perf_report(scope: Annotated[str, Field(description="必须是 Content �
     """Static performance audit from the offline rule pack (v0.3 PR-A).
 
     Reads disk + cook task archives only; findings carry rule_id/severity/subject/
-    evidence/threshold/advice, sorted error>warn, capped by total/truncated/cap.
+    evidence/threshold/advice + roi(unit/benefit/effort/rationale)，sorted error>warn, capped
+    by total/truncated/cap；顶层 roi_summary 汇总体量收益(MB)/按成本分档/正确性计数，供排优先级。
     Bridge-channel rules join when the editor is live; offline yields a half report.
 
     采样可控：bridge 规则默认只度量最大的 80 个资产（sample_size=80），在万级资产工程上

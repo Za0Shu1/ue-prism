@@ -51,7 +51,7 @@
 | `list_level_actors`（compose） | test_actors_compose | compose.world_ge_1400 / cube_batching_opportunity | 真实 WP 关卡全载成本 |
 | `read_editor_log`（P2 指纹归一+资产归因+按会话切分） / `attribute_cook_errors` | test_logscan(+3 会话用例:多会话拆分/每会话计数/单会话不标多) / test_attribute | -（纯离线，真实工程日志直读验证 distinct 194->10、LogPackageName 196 合 1 组归因 195 资产） | 与真实 cook 日志联动的归因抽检 |
 | `scan_folder_assets`（目录级预算 by_dir） | test_folderscan(+5 用例:预算/深度/cap-truncated/子树基) | -（纯离线磁盘，无引擎 API，不需夹具靶；report 间接） | 真实大工程目录占比手感 |
-| `get_perf_report`（7 规则+降档+可配采样/cap） | test_rules / test_rules_runtime | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded / cap_truncates_and_flags_hidden_errors / sampling_fields | sample_size/cap 可配（默认 top-80/cap=50）；大工程须显式调大 sample_size 或缩 scope。5.4 真机实测 sample_size 80→200 使 total 245→356（暴露 73 个被旧硬编码藏起的 error）|
+| `get_perf_report`（7 规则+降档+ROI 注解+可配采样/cap） | test_rules(+2 ROI 用例:annotate_roi 纯逻辑/run_report 带 roi_summary) / test_rules_runtime | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded / cap_truncates_and_flags_hidden_errors / sampling_fields | sample_size/cap 可配（默认 top-80/cap=50）；大工程须显式调大 sample_size 或缩 scope。5.4 真机实测 sample_size 80→200 使 total 245→356（暴露 73 个被旧硬编码藏起的 error）|
 | `cook_package` / `get_cook_status` | test_cook / test_tasks | -（cook 需真工程，不在夹具内） | 真 cook 全链路（已有 9/22 档案佐证） |
 | `preview_asset_migration` | test_migration_preview | - | - |
 | `migrate_asset_rename` / `_move` / `_asset`（写） | test_migrate / test_migrate_engine_shapes（双钥/dry_run/回滚/属性缺失形状） | migrate.rename_applies_redirect / rename_restored / move_applies / move_restored（真机 rename_asset + 5.4 move→rename 兜底，内存态自还原） | 真实工程提交后引用复核；`fix_up_redirectors` 5.4 python 未绑定（诚实报告未确认清理，编辑器手动兜底） |

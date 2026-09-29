@@ -426,6 +426,80 @@ RULES = (
 )
 
 
+# ---- ROI 注解（发现 -> 工单：给每条 finding 粗量化收益 + 改动成本档）----
+# 原则：宁可粗档，不造伪精确。体量类给 MB，渲染/正确性类给可数代理指标或标注 correctness。
+_EFFORT_BY_RULE = {
+    "asset_size_top": "mid", "texture_size": "mid", "mesh_tri": "high",
+    "wps_external_actors": "mid", "scene_light_dup": "low",
+    "cook_drop": "high", "cook_empty_maps": "high",
+}
+
+
+def _roi_of(f):
+    rid = f.get("rule_id")
+    ev = f.get("evidence") or {}
+    effort = _EFFORT_BY_RULE.get(rid, "mid")
+    unit, benefit, rationale = "correctness", None, ""
+    if rid == "asset_size_top":
+        mb = ev.get("size_mb")
+        if isinstance(mb, (int, float)):
+            unit, benefit = "memory_or_disk_mb", round(float(mb), 2)
+        if ev.get("runtime_verdict") == "disk_only_bloat":
+            effort, rationale = "low", "源盘膨胀但运行时被 MaxSize/压缩限死，收 MaxSize/重压缩即省源盘，成本极低"
+        else:
+            rationale = "真实占用，需降分辨率/流送/压缩，成本视资产而定"
+    elif rid == "texture_size":
+        mb = ev.get("size_mb")
+        if isinstance(mb, (int, float)):
+            unit, benefit = "memory_or_disk_mb", round(float(mb), 2)
+        else:
+            unit = "texture_px"
+            benefit = ev.get("width")
+        effort = "low" if ev.get("runtime_verdict") == "disk_only_bloat" else effort
+        rationale = "降分辨率/虚拟化/LOD 偏差"
+    elif rid == "mesh_tri":
+        unit = "triangles_lod0"
+        benefit = ev.get("triangles_lod0")
+        rationale = "重做 LOD/减面，牵动美术资产，成本高"
+    elif rid == "wps_external_actors":
+        unit = "external_actor_packages"
+        benefit = ev.get("count")
+        rationale = "WP 外部包过多影响加载/hitch，合并静态或调网格，成本中"
+    elif rid == "scene_light_dup":
+        counts = ev.get("counts") or {}
+        extra = 0
+        for _k, v in counts.items():
+            if isinstance(v, (int, float)):
+                extra += max(0, int(v) - 1)
+        unit, benefit = "extra_light_passes", extra
+        rationale = "删重复方向光/天光，成本低"
+    elif rid in ("cook_drop", "cook_empty_maps"):
+        rationale = "cook 正确性问题（内容被丢弃/地图没烘进包），须修管线，优先但不是体量收益"
+    else:
+        rationale = "见 advice"
+    return {"unit": unit, "benefit": benefit, "effort": effort, "rationale": rationale}
+
+
+def annotate_roi(findings):
+    """原地给每条 finding 加 roi 字段，并返回顶层 roi_summary（体量收益合计 + 按成本分档 + 正确性计数）。"""
+    summary = {"total_benefit_mb": 0.0, "by_effort": {"low": 0, "mid": 0, "high": 0},
+               "correctness": 0, "actionable_size": 0, "top_size_targets": []}
+    for f in findings:
+        roi = _roi_of(f)
+        f["roi"] = roi
+        summary["by_effort"][roi["effort"]] = summary["by_effort"].get(roi["effort"], 0) + 1
+        if roi["unit"] == "memory_or_disk_mb" and isinstance(roi["benefit"], (int, float)):
+            summary["total_benefit_mb"] = round(summary["total_benefit_mb"] + roi["benefit"], 2)
+            summary["actionable_size"] += 1
+            summary["top_size_targets"].append({"subject": f.get("subject"), "benefit_mb": roi["benefit"],
+                                                "effort": roi["effort"], "severity": f.get("severity")})
+        elif roi["unit"] == "correctness":
+            summary["correctness"] += 1
+    summary["top_size_targets"].sort(key=lambda x: (-x["benefit_mb"], x["effort"], x["subject"]))
+    summary["top_size_targets"] = summary["top_size_targets"][:20]
+    return summary
+
+
 def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP,
                recent_tasks=DEFAULT_RECENT_TASKS, sample_size=DEFAULT_SAMPLE):
     profile, used_target = load_profile(project_dir, target)
@@ -473,6 +547,7 @@ def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP
     window_ids = [r["task_id"] for r in _cook_records(ctx)]
     rank = {"error": 0, "warn": 1}
     findings.sort(key=lambda x: (rank.get(x["severity"], 9), x["rule_id"], x["subject"]))  # 稳定序：diff 友好
+    roi_summary = annotate_roi(findings)
     total = len(findings)
     summary = {"error": sum(1 for x in findings if x["severity"] == "error"),
                "warn": sum(1 for x in findings if x["severity"] == "warn"),
@@ -498,6 +573,7 @@ def run_report(project_dir, bus_dir, scope="/Game", target=None, cap=DEFAULT_CAP
         "engine": None,
         "note": note,
         "summary": summary,
+        "roi_summary": roi_summary,
         "runtime_size_downgraded": runtime_downgraded,
         "sampling": {"sample_size": sample_size, "scan_universe": universe,
                      "scan_universe_truncated": scan_trunc, "measured": measured,

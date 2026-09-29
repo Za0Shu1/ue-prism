@@ -441,3 +441,41 @@ def test_nested_map_cooked_disk_evidence(tmp_path):
     open(umap, "wb").write(b"x")
     rep2 = rules.run_report(proj, b)
     assert [f for f in rep2["findings"] if f["rule_id"] == "cook_empty_maps"] == []
+# ---- ROI 注解 ----
+
+def test_annotate_roi_pure():
+    findings = [
+        {"rule_id": "asset_size_top", "severity": "error", "subject": "/Game/Big",
+         "evidence": {"size_mb": 50.0, "runtime_verdict": "runtime_heavy"}, "threshold": 10, "advice": "x"},
+        {"rule_id": "asset_size_top", "severity": "warn", "subject": "/Game/Bloat",
+         "evidence": {"size_mb": 54.8, "runtime_verdict": "disk_only_bloat"}, "threshold": 10, "advice": "y"},
+        {"rule_id": "mesh_tri", "severity": "warn", "subject": "/Game/M",
+         "evidence": {"triangles_lod0": 123456}, "threshold": 1000, "advice": "z"},
+        {"rule_id": "scene_light_dup", "severity": "warn", "subject": "/Game/L",
+         "evidence": {"counts": {"DirectionalLight": 3, "SkyLight": 2}}, "threshold": 2, "advice": "dup"},
+        {"rule_id": "cook_empty_maps", "severity": "error", "subject": "t1",
+         "evidence": {"cooked_total": 0}, "threshold": 1, "advice": "fix"},
+    ]
+    summ = rules.annotate_roi(findings)
+    by = {f["subject"]: f["roi"] for f in findings}
+    assert by["/Game/Big"]["unit"] == "memory_or_disk_mb" and by["/Game/Big"]["benefit"] == 50.0
+    assert by["/Game/Big"]["effort"] == "mid"
+    assert by["/Game/Bloat"]["effort"] == "low"            # disk_only_bloat 降成本
+    assert by["/Game/M"]["unit"] == "triangles_lod0" and by["/Game/M"]["effort"] == "high"
+    assert by["/Game/L"]["unit"] == "extra_light_passes" and by["/Game/L"]["benefit"] == (3 - 1) + (2 - 1)
+    assert by["t1"]["unit"] == "correctness"
+    assert summ["total_benefit_mb"] == round(50.0 + 54.8, 2)
+    assert summ["actionable_size"] == 2 and summ["correctness"] == 1
+    assert summ["by_effort"]["low"] == 2 and summ["by_effort"]["high"] == 2 and summ["by_effort"]["mid"] == 1
+    assert summ["top_size_targets"][0]["subject"] == "/Game/Bloat"   # 54.8 > 50
+    assert summ["top_size_targets"][0]["effort"] == "low"
+
+
+def test_run_report_carries_roi_summary(tmp_path):
+    proj = _proj(tmp_path, toml=TOML)
+    b = _bus(tmp_path)
+    rep = rules.run_report(proj, b)
+    assert "roi_summary" in rep
+    f = rep["findings"][0]
+    assert f["rule_id"] == "asset_size_top" and f["roi"]["unit"] == "memory_or_disk_mb"
+    assert isinstance(rep["roi_summary"]["by_effort"]["mid"], int)
