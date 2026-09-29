@@ -40,6 +40,12 @@
 - **真机 API 路径必须进夹具**：给 `scripts/calib_fixture/` 加已知真值靶，并在 `docs/TESTING.md` 的资产真值表与工具覆盖矩阵登记；让用户自己准备测试用例/测试数据 = 缺陷。
 - 提交/合并前：L0 全绿；改动触碰 unreal 真机路径 → 至少一个引擎版本 L2 全 PASS。
 
+## 发布纪律（不可擅自发版）
+- **发布 = 打 tag / 推 tag / 触发 PyPI 上传 / 建 GitHub Release**，全部是对外不可逆动作（PyPI 不能删版本重发）。
+- **只有用户在当前对话里明确授权“发布 vX.Y.Z”时才允许执行**。完成 TODO、测试全绿、用户说“收尾/推进”等，**一律不构成本次发布授权**。
+- 攒够增量后应**停下来问**，得到明确的发版指令（含版本号）再动；不确定就当没授权，只提交代码不 tag。
+- 版本号只在获得发版授权、真正打 tag 时才 bump 到 `pyproject.toml` + `prism/__init__.py`，不提前改。
+
 ## 依赖与打包
 - `pyproject.toml` 锁 `mcp>=2,<3`。改 `server.py` 前核对所 pin 版本的 MCP SDK 导入路径与 tool 注册 API。
 - 安装：`pip install -e .`（dev）；server 侧无引擎依赖。
