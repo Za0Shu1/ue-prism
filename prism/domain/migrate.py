@@ -315,8 +315,17 @@ def migrate_asset(asset_path, dest_path, new_name=None, dry_run=True, confirm=Fa
         return envelope.make_err(envelope.Code.UE_API_MISMATCH, "EditorAssetLibrary.duplicate_asset 不可用")
     results = []
     ok_n = 0
+    mk = getattr(E, "make_directory", None)
     for it in plan_items:
         entry = {"src": it["src"], "dst": it["dst"]}
+        # 目标目录不存在时 duplicate_asset 可能失败：先建目录（幂等，缺失则补）
+        if mk is not None:
+            dst_folder = it["dst"].rsplit("/", 1)[0]
+            if dst_folder:
+                try:
+                    mk(dst_folder)
+                except Exception:
+                    pass
         try:
             ret = dup(it["src"], it["dst"])
         except Exception as e:

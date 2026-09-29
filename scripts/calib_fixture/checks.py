@@ -116,6 +116,40 @@ def _migrate_move_roundtrip(r):
             r.check("migrate.move_restored", False, "exception: %r" % (e,))
 
 
+
+
+def _migrate_copy_roundtrip(r):
+    """真机复制迁移校验：复制 M_CalibRef(硬引用 T_CalibRef) -> 应带走整条 /Game uses 闭包(2 包)。
+    内存态(不 save)，关编辑器丢弃；验证 migrate_asset copy 的 get_asset_chain 闭包 + duplicate_asset
+    落新包可解析 + 目标目录自动创建(make_directory 修复)。"""
+    src = F + "/M_CalibRef"
+    dest = TMPDIR + "/copy"
+    base = r.call("describe_asset", {"asset_path": src})
+    if not base.get("found"):
+        r.check("migrate.copy_dryrun_plan", False, "baseline missing: %s" % base)
+        r.check("migrate.copy_applies", False, "skipped (no baseline)")
+        return
+    dr = r.call("migrate_asset", {"asset_path": src, "dest_path": dest, "dry_run": True})
+    ok_plan = (dr.get("dry_run") is True and dr.get("executed") is False
+               and dr.get("mode") == "copy" and dr.get("packages") == 2
+               and dr.get("collision_count") == 0)
+    r.check("migrate.copy_dryrun_plan", ok_plan,
+            {"packages": dr.get("packages"), "mode": dr.get("mode"),
+             "collision_count": dr.get("collision_count"),
+             "total_size_mb": dr.get("total_size_mb"),
+             "dsts": [it.get("dst") for it in (dr.get("items") or [])]})
+    wr = r.call("migrate_asset", {"asset_path": src, "dest_path": dest,
+                                  "dry_run": False, "confirm": True})
+    dsts = [res.get("dst") for res in (wr.get("results") or []) if res.get("dst")]
+    root_found = r.call("describe_asset", {"asset_path": dsts[0]}).get("found") if dsts else False
+    ok_write = (wr.get("executed") is True and wr.get("success") is True
+                and wr.get("duplicated") == wr.get("of") and wr.get("of") == 2
+                and root_found is True)
+    r.check("migrate.copy_applies", ok_write,
+            {"duplicated": wr.get("duplicated"), "of": wr.get("of"),
+             "success": wr.get("success"), "root_found_after": root_found,
+             "dsts": dsts})
+
 def run_all(bus_dir, project_dir):
     r = Runner(bus_dir)
     pg = r.call("ping", {})
@@ -277,6 +311,7 @@ def run_all(bus_dir, project_dir):
 
     _migrate_rename_roundtrip(r)
     _migrate_move_roundtrip(r)
+    _migrate_copy_roundtrip(r)
     matrix = {
         "ue_version": pg.get("ue_version"),
         "metrics_tried": {k: v.get("tried") for k, v in items.items()},

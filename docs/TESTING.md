@@ -9,7 +9,8 @@
 |---|---|---|---|
 | **L0 离线套件** | 无引擎，Python>=3.10 | `python -m pytest` | 协议/信封/总线/规则纯逻辑/降级结构契约。改任何层必跑 |
 | **L1 桥冒烟** | 编辑器在线 | `python scripts/verify_connection.py`；`python scripts/bus_call.py <bus_dir> ping` | 心跳、往返、UE 版本 |
-| **L2 校准夹具** | 任意 UE5 工程装好桥插件 | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 20 项校验（含写路径 rename/move 内存态自还原往返，见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
+| **L2 校准夹具** | 任意 UE5 工程装好桥插件（编辑器在线） | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 22 项校验（含写路径 rename/move/copy 往返；copy 走 `migrate_asset` duplicate+uses 闭包，内存态自还原，见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
+| **L2 cook 全链路** | 任意 UE5 工程 + 本机 UE（**编辑器须关闭**） | `python scripts/verify_cook_chain.py --project <P>` | cook_package 真实全链路：dry-run 组装→双钥真执行→轮询状态→校验 cooked 产物落盘→日志错误归因（9 项校验，见下）。因需编辑器关闭、且不经过桥，与 run_fixture 互斥、单独成脚本 |
 | **L3 真实工程抽样** | 客户的真实大工程 | 人工驱动 MCP 工具 + 抽检 | 假阳性率、大闭包耗时、阈值手感 |
 
 ## L2 校准夹具：资产真值表
@@ -36,6 +37,22 @@
   bus 在主线程 tick 内处理、sleep 无效）；热态直读又可能是 **MaxSize 限幅后的有效尺寸**。
   因此度量层固定三分口径：`width`（现状）、`source_width`（源反推，规则判据）、`effective_width`（限幅后）。
 
+## L2 cook 全链路（`scripts/verify_cook_chain.py`）
+
+cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编辑器桥**，且要求编辑器关闭（避免与 headless cook 争用工程锁）。故它不进 `run_fixture`（后者会重开编辑器），单独成脚本、单独跑。机器绝对路径只在脚本 stdout 回显，不入库。
+
+链路（5.4 真机实证，夹具工程）：
+1. 前置体检：`.uproject` 存在 + 桥非活跃（编辑器确已关）。
+2. `dry_run` 组装：命令含 `BuildCookRun -cook -skipstage +maps="/Game/PrismCalib/CalibMap"`，`runuat_found`/`engine_root`（注册表定位）就绪。
+3. 双钥真执行（`dry_run=False` 且 `confirm=True`）→ 返回 `task_id`。
+4. 轮询 `get_cook_status` 收敛到 `succeeded`（exit_code 0）。
+5. 校验 cooked 产物落盘：`Saved/Cooked/<平台>/<工程>/Content/PrismCalib/CalibMap.umap` 存在。
+6. `attribute_cook_errors` 归因：0 个 Error 组（真机 695 包 / 0 error / 13 warning；13 条 warning 系夹具故意造的坏材质 `M_CalibBroken`/`M_CalibStub`，符合预期）。
+
+- 9 项校验全 PASS 退出 0；`--dry` 只做组装冒烟（不启动真实 cook），`--help` 见参数。
+- 坑（已内化进脚本与工具描述）：`+maps` 写错地图名会被 BuildCookRun 静默忽略（cook 成功却什么都没 cook），先核对真实 map 路径；UE cook 宽松——缺盘资产只记 Warning 并从 cooked map 静默丢弃，`BUILD SUCCESSFUL` 不等于内容完整，须结合 `attribute_cook_errors`/`read_editor_log` 的 Warning 级判读。
+- package 模式（`-build -stage -pak -archive`）打包链路仍欠真机验证（归 L3）。
+
 ## 工具覆盖矩阵（当前 21 个 MCP 工具）
 
 | 工具 | L0 离线用例 | L2 夹具 checks | 仍欠（L3 真实工程） |
@@ -52,9 +69,9 @@
 | `read_editor_log`（P2 指纹归一+资产归因+按会话切分） / `attribute_cook_errors` | test_logscan(+3 会话用例:多会话拆分/每会话计数/单会话不标多) / test_attribute | -（纯离线，真实工程日志直读验证 distinct 194->10、LogPackageName 196 合 1 组归因 195 资产） | 与真实 cook 日志联动的归因抽检 |
 | `scan_folder_assets`（目录级预算 by_dir） | test_folderscan(+5 用例:预算/深度/cap-truncated/子树基) | -（纯离线磁盘，无引擎 API，不需夹具靶；report 间接） | 真实大工程目录占比手感 |
 | `get_perf_report`（7 规则+降档+ROI 注解+vs-上次 diff+可配采样/cap） | test_rules(+4 用例:annotate_roi 纯逻辑/run_report 带 roi_summary/report diff vs previous/snapshot disabled) / test_rules_runtime | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded / cap_truncates_and_flags_hidden_errors / sampling_fields | sample_size/cap 可配（默认 top-80/cap=50）；大工程须显式调大 sample_size 或缩 scope。5.4 真机实测 sample_size 80→200 使 total 245→356（暴露 73 个被旧硬编码藏起的 error）|
-| `cook_package` / `get_cook_status` | test_cook / test_tasks | -（cook 需真工程，不在夹具内） | 真 cook 全链路（已有 9/22 档案佐证） |
+| `cook_package` / `get_cook_status` | test_cook / test_tasks | `scripts/verify_cook_chain.py` 真机 9 项：uproject/编辑器关闭前置/dry 组装(+maps 定位)/双钥启动/状态收敛/succeeded(exit0)/cooked `CalibMap.umap` 落盘/`attribute_cook_errors` 0 错误组（UE5.4 实跑 BUILD SUCCESSFUL，695 包/0 error） | package 模式（`-build -stage -pak -archive`）打包链路；跨版本 cook 兼容 |
 | `preview_asset_migration` | test_migration_preview | - | - |
-| `migrate_asset_rename` / `_move` / `_asset`（写） | test_migrate / test_migrate_engine_shapes（双钥/dry_run/回滚/属性缺失形状） | migrate.rename_applies_redirect / rename_restored / move_applies / move_restored（真机 rename_asset + 5.4 move→rename 兜底，内存态自还原） | 真实工程提交后引用复核；`fix_up_redirectors` 5.4 python 未绑定（诚实报告未确认清理，编辑器手动兜底） |
+| `migrate_asset_rename` / `_move` / `_asset`（写） | test_migrate / test_migrate_engine_shapes（双钥/dry_run/回滚/属性缺失形状） | migrate.rename_applies_redirect / rename_restored / move_applies / move_restored / copy_dryrun_plan / copy_applies（真机 rename_asset + 5.4 move→rename 兜底，内存态自还原；copy 走 `migrate_asset` duplicate 带走 uses 闭包 2 包 + 目标目录自动建 `make_directory`，内存态不落盘） | 真实工程提交后引用复核；`fix_up_redirectors` 5.4 python 未绑定（诚实报告未确认清理，编辑器手动兜底） |
 | 基建（bus/envelope/cli/pluginpack/resolve） | test_bus / test_buscall / test_cli / test_pluginpack / test_resolve | - | - |
 
 ## 新功能测试纪律
