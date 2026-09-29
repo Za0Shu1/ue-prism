@@ -53,6 +53,19 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 - `--mode package`（真机 L3，UE5.4 夹具实证）：追加 `-build`（首次编译 Game 目标）+ cook/stage/pak/archive，产物校验改为在归档目录（`--output-dir`，缺省 `<project>/Archived`）递归命中 `<工程>.exe` 与 `*-Windows.pak`；`-archivedirectory` 仅在传 `--output-dir` 时进命令、dry-run 会校验之。实跑 `BUILD SUCCESSFUL`/exit 0/归档 exe+~9.6MB pak/0 Error 组，10 项全 PASS；`--configuration` 可切 Development/Shipping，两配置各 10/10（Shipping 编译更重、耗时略长）。
 - 坑（已内化进脚本与工具描述）：`+maps` 写错地图名会被 BuildCookRun 静默忽略（cook 成功却什么都没 cook），先核对真实 map 路径；UE cook 宽松——缺盘资产只记 Warning 并从 cooked map 静默丢弃，`BUILD SUCCESSFUL` 不等于内容完整，须结合 `attribute_cook_errors`/`read_editor_log` 的 Warning 级判读。package 走全量构建，`map`/`iterate` 被忽略（地图由构建期决定）。
 
+## 引擎兼容矩阵（实测）
+
+同一套 `run_fixture`（22 项：域层 `unreal` API + 规则）与 `verify_cook_chain`（cook 9 项 / package 10 项）在不同引擎版本各跑一次即成矩阵。当前实测：
+
+| 引擎 | L2 夹具 run_fixture | cook 全链路 | package 全链路 |
+|---|---|---|---|
+| UE 5.4.4 | 22/22 | 9/9（695 包/0 error） | Development + Shipping 各 10/10 |
+| UE 5.3.2 | 22/22 | 9/9 | 未跑（`-build` 需 C++ 游戏 target；5.3 夹具宿主为蓝图工程） |
+
+- 域层跨版本靠多签名 `try` 兜底，`tried` 实测两版一致：`used_by`/`get_dependencies`=`name+opts`；纹理尺寸无直读 API → `blueprint_get_memory_size` + 源盘反推；5.3/5.4 `EditorAssetLibrary.move_asset` 皆 `AttributeMissing` → 走 `rename_asset` 兜底。
+- 夹具生成器坑（已修）：**UE 5.3 的 Interchange 导入忽略 `AssetImportTask.destination_name`**（包名由源文件名决定），复用同一 PNG 造改名基准贴图（`T_CalibRef/Broken/Stub`）在 5.3 建不出来，连带 5 项 refs/copy 校验失败。修法是这些改名基准改走 `EditorAssetLibrary.duplicate_asset`（显式目标名，跨版本稳）→ 5.3/5.4 均回到 22/22。
+- 尚未覆盖：5.3 package（需带 C++ target 的宿主）、更多版本（5.5/5.8 本机未装/未验证）。
+
 ## 工具覆盖矩阵（当前 21 个 MCP 工具）
 
 | 工具 | L0 离线用例 | L2 夹具 checks | 仍欠（L3 真实工程） |

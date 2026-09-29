@@ -36,6 +36,24 @@ def _import_png(png, name):
     return EAL.does_asset_exist(FOLDER + "/" + name)
 
 
+def _ensure_texture(dest_name, png=None):
+    """5.3 Interchange 会忽略 destination_name(源文件名决定包名)，故对需要改名的
+    基准贴图统一走 duplicate_asset(显式目标名，跨版本稳)。优先复制已导入的 T_Used1K；
+    基准缺失时回退到 png 导入(仅当源文件名恰等于 dest_name 时在 5.3 才有效)。"""
+    dest = FOLDER + "/" + dest_name
+    if EAL.does_asset_exist(dest):
+        EAL.delete_asset(dest)
+    base = FOLDER + "/T_Used1K"
+    if EAL.does_asset_exist(base):
+        dup = EAL.duplicate_asset(base, dest)
+        if dup is not None and EAL.does_asset_exist(dest):
+            EAL.save_asset(dest)
+            return True
+    if png and os.path.isfile(png):
+        return _import_png(png, dest_name)
+    return False
+
+
 def main():
     tmp = _tmp_dir()
     pngs = os.path.join(tmp, "pngs")
@@ -88,7 +106,7 @@ def main():
         png = os.path.join(pngs, "T_Used1K.png")
         if not os.path.isfile(png):
             raise RuntimeError("missing png for T_CalibRef: " + png)
-        if not _import_png(png, "T_CalibRef"):
+        if not _ensure_texture("T_CalibRef", png=png):
             raise RuntimeError("import T_CalibRef failed")
         dest = FOLDER + "/M_CalibRef"
         if EAL.does_asset_exist(dest):
@@ -116,7 +134,7 @@ def main():
         png = os.path.join(pngs, "T_Used1K.png")
         if not os.path.isfile(png):
             raise RuntimeError("missing png for T_CalibBroken: " + png)
-        if not _import_png(png, "T_CalibBroken"):
+        if not _ensure_texture("T_CalibBroken", png=png):
             raise RuntimeError("import T_CalibBroken failed")
         dest = FOLDER + "/M_CalibBroken"
         if EAL.does_asset_exist(dest):
@@ -152,7 +170,7 @@ def main():
         for nm in ("M_CalibStub", "T_CalibStub", "T_CalibStubMoved"):
             if EAL.does_asset_exist(FOLDER + "/" + nm):
                 EAL.delete_asset(FOLDER + "/" + nm)
-        if not _import_png(png, "T_CalibStub"):
+        if not _ensure_texture("T_CalibStub", png=png):
             raise RuntimeError("import T_CalibStub failed")
         at = unreal.AssetToolsHelpers.get_asset_tools()
         mat = at.create_asset("M_CalibStub", FOLDER, unreal.Material,
