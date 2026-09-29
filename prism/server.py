@@ -236,13 +236,13 @@ def read_editor_log(level: Annotated[str, Field(description="Error|Warning|Displ
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e), traceback.format_exc())
 
 
-def scan_folder_assets(folder: Annotated[str, Field(description="Content 下文件夹，/Game 前缀可省略")] = "/Game", sort: Annotated[str, Field(description="size（默认）| path")] = "size", limit: Annotated[int, Field(description="返回条数上限")] = 500, project_dir: Annotated[str | None, Field(description="显式工程目录（与 project= 二选一）")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """Audit on-disk assets under <project>/Content: sorted by size + per-type totals. Offline; no bridge."""
+def scan_folder_assets(folder: Annotated[str, Field(description="Content 下文件夹，/Game 前缀可省略")] = "/Game", sort: Annotated[str, Field(description="size（默认）| path")] = "size", limit: Annotated[int, Field(description="返回条数上限")] = 500, budget_depth: Annotated[int, Field(description="目录预算聚合深度：1=一级子目录（默认）；0=叶子目录全链")] = 1, budget_cap: Annotated[int, Field(description="目录预算返回条数上限；<=0 全返")] = 30, project_dir: Annotated[str | None, Field(description="显式工程目录（与 project= 二选一）")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """Audit on-disk assets under <project>/Content: sorted by size + per-type + per-directory budget. Offline; no bridge."""
     pd, err = _resolve_offline_dir(project_dir, project)
     if err:
         return err
     try:
-        return envelope.make_ok(folderscan.scan_folder_assets(pd, folder=folder, sort=sort, limit=int(limit)))
+        return envelope.make_ok(folderscan.scan_folder_assets(pd, folder=folder, sort=sort, limit=int(limit), budget_depth=int(budget_depth), budget_cap=int(budget_cap)))
     except FileNotFoundError as e:
         return envelope.make_err(envelope.Code.RUNTIME_ERROR, str(e))
     except Exception as e:
