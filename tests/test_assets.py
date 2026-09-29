@@ -107,3 +107,46 @@ def test_merge_detail_hard_soft_union():
     assert assets._merge_detail(hard, soft, limit=1) == [{"package": "/Game/A", "hard": True, "soft": False}]
     assert assets._merge_detail(None, None, 10) == []
 
+
+
+def test_scan_broken_references_degrade(tmp_path):
+    """无引擎：scan_broken_references 结构键常驻、返回空、不假装找到注册表。"""
+    bdir = str(tmp_path / "bus")
+    _bridge(bdir)
+    env = bus.BusClient(bdir, timeout=5).call(
+        "scan_broken_references",
+        {"asset_paths": ["/Game/Foo/Bar"], "folder": "/Game", "limit": 10, "max_items": 10},
+    )
+    assert env["ok"] is True
+    r = env["result"]
+    for k in ("broken", "by_dep", "fixable_redirector_deps", "broken_count",
+              "missing_count", "redirector_count", "assets_with_broken",
+              "total_scanned", "total_available", "truncated", "cap", "scope"):
+        assert k in r
+    assert r["broken"] == [] and r["broken_count"] == 0
+    assert r["missing_count"] == 0 and r["redirector_count"] == 0
+    assert r["found_registry"] is False
+
+
+def test_dep_resolution_status_kinds(monkeypatch):
+    """_dep_resolution_status 三态判据：missing(解析不到)/redirector(桩)/ok(真资产)。"""
+    from prism.domain import assets as A
+    REDIR = object()
+    OK = object()
+    def fake_data(ar, unreal, pkg, obj):
+        if pkg.endswith("/Missing"):
+            return None
+        if pkg.endswith("/Stub"):
+            return REDIR
+        return OK
+    def fake_cls(unreal, data):
+        if data is REDIR:
+            return "ObjectRedirector"
+        if data is OK:
+            return "Texture2D"
+        return None
+    monkeypatch.setattr(A, "_asset_data", fake_data)
+    monkeypatch.setattr(A, "_class_name", fake_cls)
+    assert A._dep_resolution_status(None, None, "/Game/A/Missing") == ("missing", None)
+    assert A._dep_resolution_status(None, None, "/Game/A/Stub") == ("redirector", "ObjectRedirector")
+    assert A._dep_resolution_status(None, None, "/Game/A/Good") == ("ok", "Texture2D")

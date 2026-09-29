@@ -217,6 +217,22 @@ def scan_orphan_assets(folder: Annotated[str, Field(description="扫描范围，
          "max_orphans": int(max_orphans), "recent_days": int(recent_days),
          "cascade": cascade})
 
+
+def scan_broken_references(asset_paths: Annotated[str, Field(description="只查这些资产（逗号/分号/换行分隔的 /Game 路径）；填了则忽略 folder")] = "", folder: Annotated[str, Field(description="扫描范围，Content 下目录前缀（默认 /Game）")] = "/Game", limit: Annotated[int, Field(description="本窗口最多扫描多少资产（逐个查硬依赖）")] = 200, offset: Annotated[int, Field(description="分页偏移")] = 0, max_items: Annotated[int, Field(description="broken/by_dep 明细输出上限")] = 200, include_engine: Annotated[bool, Field(description="true=把 /Engine 依赖也纳入（默认只看 /Game）")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """扫描悬空/坏引用（只读）：资产硬依赖指向的 /Game 包无法解析——missing(目标已不在注册表)或 redirector(只剩重定向桩，可修复)。Needs live bridge.
+
+    kind=missing 通常需从 VCS 还原或重新指向；kind=redirector 可由 fix_broken_references 安全修复
+    （fixable_redirector_deps 给其输入）。静态口径不含软引用/运行时拼字符串路径。工程越大用 limit/offset 分页。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    paths = [x.strip() for x in re.split(r"[,;\n]+", asset_paths or "") if x.strip()]
+    return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call(
+        "scan_broken_references",
+        {"asset_paths": paths, "folder": folder, "limit": int(limit), "offset": int(offset),
+         "max_items": int(max_items), "include_engine": _as_bool(include_engine, default=False)})
+
 # ---------------- 离线工具（读磁盘） ----------------
 
 def read_editor_log(level: Annotated[str, Field(description="Error|Warning|Display|All")] = "Error", tail: Annotated[int, Field(description="从日志末尾读取的行数")] = 2000, top: Annotated[int, Field(description="聚合分组上限")] = 30, project_dir: Annotated[str | None, Field(description="显式工程目录（与 project= 二选一）")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
@@ -578,7 +594,7 @@ def migrate_asset(asset_path: Annotated[str, Field(description="/Game 包路径�
 
 _TOOLS = (
     ping, list_level_actors, describe_asset, get_asset_references, get_asset_metrics,
-    get_asset_chain, scan_orphan_assets,
+    get_asset_chain, scan_orphan_assets, scan_broken_references,
     read_editor_log, scan_folder_assets,
     cook_package, get_cook_status, attribute_cook_errors,
     get_perf_report, list_perf_rules,

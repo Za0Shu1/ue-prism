@@ -230,6 +230,24 @@ def run_all(bus_dir, project_dir):
             {"used_by": rres.get("used_by"), "detail": matd,
              "soft_count": rres.get("used_by_soft_count"), "api": rres.get("api")})
 
+    # P2 scan_broken_references：真机对已知坏引用靶(材质硬引用后贴图被删 -> missing dep)断言，
+    # 同批扫 /Game/PrismCalib 做正负对照：坏靶 T_CalibBroken 必被标记；健康 T_CalibRef 必不误报(假阳性负控)。
+    def call_broken():
+        return r.call("scan_broken_references", {"folder": "PrismCalib", "limit": 200})
+    bres = call_broken()
+    bdeps = [str(x.get("dep", "")) for x in (bres.get("broken") or [])]
+    hit = [d for d in bdeps if d.endswith("/T_CalibBroken")]
+    kinds = {str(x.get("dep", "")).rpartition("/")[2]: x.get("kind")
+             for x in (bres.get("broken") or [])}
+    neg_clean = not any(d.endswith("/T_CalibRef") for d in bdeps)
+    ok_broken = (bres.get("found_registry") is True and len(hit) >= 1 and neg_clean)
+    r.check("refs.broken_missing_target", ok_broken,
+            {"broken_deps": bdeps[:10], "kinds": kinds,
+             "missing_count": bres.get("missing_count"),
+             "redirector_count": bres.get("redirector_count"),
+             "assets_with_broken": bres.get("assets_with_broken"),
+             "total_scanned": bres.get("total_scanned"), "api": bres.get("api")})
+
     _migrate_rename_roundtrip(r)
     _migrate_move_roundtrip(r)
     matrix = {

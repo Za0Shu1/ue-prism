@@ -109,6 +109,37 @@ def main():
 
     step("calib_ref", calib_ref)
 
+    def calib_broken():
+        """坏引用真值靶(scan_broken_references)：造材质 M_CalibBroken 硬引用贴图 T_CalibBroken，
+        随后删除该贴图(不留桩) -> M_CalibBroken 留一条指向已不存在包的悬空硬依赖(等价 cook 的 Could not find package)。
+        5.4 headless 实证: delete_asset 可用; 材质 import 表仍记录已删包路径。"""
+        png = os.path.join(pngs, "T_Used1K.png")
+        if not os.path.isfile(png):
+            raise RuntimeError("missing png for T_CalibBroken: " + png)
+        if not _import_png(png, "T_CalibBroken"):
+            raise RuntimeError("import T_CalibBroken failed")
+        dest = FOLDER + "/M_CalibBroken"
+        if EAL.does_asset_exist(dest):
+            EAL.delete_asset(dest)
+        at = unreal.AssetToolsHelpers.get_asset_tools()
+        mat = at.create_asset("M_CalibBroken", FOLDER, unreal.Material,
+                              unreal.MaterialFactoryNew())
+        if mat is None:
+            raise RuntimeError("create M_CalibBroken failed")
+        tex = unreal.load_asset(FOLDER + "/T_CalibBroken")
+        expr = unreal.MaterialEditingLibrary.create_material_expression(
+            mat, unreal.MaterialExpressionTextureSample, -300, 0)
+        expr.set_editor_property("texture", tex)
+        unreal.MaterialEditingLibrary.connect_material_property(
+            expr, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        EAL.save_asset(dest)
+        tgt = FOLDER + "/T_CalibBroken"
+        ok_del = EAL.delete_asset(tgt)
+        return {"deleted_texture": bool(ok_del), "texture": tgt,
+                "expect": "M_CalibBroken missing hard-dep on " + tgt}
+
+    step("calib_broken", calib_broken)
+
     out["assets"] = sorted(str(d.package_name) for d in
                            (unreal.AssetRegistryHelpers.get_asset_registry()
                             .get_assets_by_path(unreal.Name(FOLDER), True) or []))

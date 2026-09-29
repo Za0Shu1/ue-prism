@@ -984,3 +984,164 @@ def scan_orphan_assets(folder="/Game", limit=2000, offset=0, max_orphans=200, re
     if result["truncated"]:
         result["scan_note"] = "本次仅扫描 offset=%d 起 %d 个资产(共 %d)；reclaimable 为该窗口内值，翻页可累计。" % (offset, result["total_scanned"], total_all)
     return result
+
+
+
+def _dep_resolution_status(ar, unreal, dep_pkg):
+    """/Game(或 /Engine) 依赖包在注册表里的解析态：ok | missing | redirector。
+
+    _asset_data 解析不到 = missing(目标硬删/改名遗留/坏路径，cook/加载会报 Could not find package)；
+    解析到但类名含 Redirector = 可修复的重定向桩；否则 ok。"""
+    leaf = dep_pkg.rpartition("/")[2]
+    obj = (dep_pkg + "." + leaf) if leaf else dep_pkg
+    data = _asset_data(ar, unreal, dep_pkg, obj)
+    if data is None:
+        return "missing", None
+    try:
+        cls = _class_name(unreal, data)
+    except Exception:
+        cls = None
+    if cls and "Redirector" in str(cls):
+        return "redirector", cls
+    return "ok", cls
+
+
+@register
+def scan_broken_references(asset_paths=None, folder="/Game", limit=200, offset=0,
+                           max_items=200, include_engine=False):
+    """扫描『悬空/坏引用』(只读)：资产的硬依赖(序列化 import 表)指向的包无法解析。
+
+    kind=missing  = 目标 /Game 包已不在 AssetRegistry(被硬删、改名未留桩、或写坏的绝对路径)
+                    -> cook/加载会报 Could not find package；通常需从 VCS 还原或重新指向。
+    kind=redirector = 目标只剩重定向桩(ObjectRedirector) -> 可被 fix_broken_references 安全修复。
+
+    范围二选一：给 asset_paths 只查这些资产(逐个 get_dependencies)；否则枚举 folder(/Game 前缀可省)。
+    默认只看 /Game 依赖(include_engine=True 才把 /Engine 依赖纳入；/Script 原生类引用恒排除)。
+    静态口径：不含运行时拼字符串/软对象路径(AssetRegistry 无法反查不存在的软目标)，那些留 L3 真机日志核对。
+
+    limit=本窗口扫描多少资产；offset 翻页；max_items 截 broken/by_dep 明细输出。列表带 total/truncated/cap。
+    无引擎(总线降级)结构键常驻、返回空。
+    """
+    if isinstance(include_engine, str):
+        include_engine = include_engine.strip().lower() in ("1", "true", "yes")
+    include_engine = bool(include_engine)
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 200
+    try:
+        offset = max(0, int(offset))
+    except Exception:
+        offset = 0
+    try:
+        max_items = max(1, int(max_items))
+    except Exception:
+        max_items = 200
+
+    result = {
+        "found_registry": False, "scope": None,
+        "total_scanned": 0, "total_available": 0,
+        "offset": offset, "cap": limit, "truncated": False,
+        "assets_with_broken": 0,
+        "broken_count": 0, "missing_count": 0, "redirector_count": 0,
+        "fixable_redirector_deps": [], "broken": [], "broken_truncated": False,
+        "by_dep": [], "api": {},
+        "note": ("硬依赖=序列化 import 表；missing=目标包已不在注册表(硬删/改名未留桩/坏路径)，"
+                 "cook/加载报 Could not find package。redirector=只剩重定向桩，可用 fix_broken_references 修复。"
+                 "软引用/运行时拼路径不在静态口径(见正文)。"),
+    }
+    ap_list = [str(x).strip() for x in (asset_paths or []) if str(x).strip()]
+    folder = (folder or "/Game").strip().strip('"')
+    if not folder.startswith("/Game"):
+        folder = "/Game/" + folder.lstrip("/")
+    try:
+        import unreal
+    except Exception:
+        result["note"] = "no_engine: 需编辑器在线(桥)才能枚举资产与依赖图。"
+        return result
+    ar = _registry()
+    if ar is None:
+        return envelope.make_err(envelope.Code.UE_API_MISMATCH,
+                                 "AssetRegistry unavailable: get_asset_registry failed on this engine build")
+    result["found_registry"] = True
+
+    if ap_list:
+        pkgs = []
+        for ap in ap_list:
+            p = _normalize(ap)[0]
+            if p and p not in pkgs:
+                pkgs.append(p)
+        result["scope"] = "asset_paths"
+        total_all = len(pkgs)
+    else:
+        datas = _assets_under(ar, unreal, folder)
+        if datas is None:
+            return envelope.make_err(envelope.Code.UE_API_MISMATCH,
+                                     "get_assets_by_path: no candidate signature matched (5.0-5.8 drift?)")
+        pkgs = []
+        for d in datas:
+            try:
+                pkg = _name_str(d.package_name)
+            except Exception:
+                continue
+            if pkg and pkg not in pkgs:
+                pkgs.append(pkg)
+        pkgs.sort()
+        result["scope"] = "folder:" + folder
+        total_all = len(pkgs)
+    result["total_available"] = total_all
+    window = pkgs[offset: offset + limit]
+    result["total_scanned"] = len(window)
+    result["truncated"] = (offset + limit) < total_all
+
+    resolution_cache = {}
+    dep_referencers = {}
+    broken_rows = []
+    sigs = set()
+    for pkg in window:
+        deps, sig = _registry_graph(ar, unreal, "get_dependencies", pkg, False)
+        if sig:
+            sigs.add(sig)
+        if not deps:
+            continue
+        has_broken = False
+        seen = set()
+        for dep in deps:
+            dep = dep if isinstance(dep, str) else _name_str(dep)
+            if not dep or dep == pkg or dep in seen:
+                continue
+            seen.add(dep)
+            if dep.startswith("/Game"):
+                pass
+            elif include_engine and dep.startswith("/Engine"):
+                pass
+            else:
+                continue
+            if dep in resolution_cache:
+                st, cls = resolution_cache[dep]
+            else:
+                st, cls = _dep_resolution_status(ar, unreal, dep)
+                resolution_cache[dep] = (st, cls)
+            if st == "ok":
+                continue
+            broken_rows.append({"asset": pkg, "dep": dep, "kind": st, "dep_class": cls})
+            dep_referencers.setdefault(dep, set()).add(pkg)
+            has_broken = True
+        if has_broken:
+            result["assets_with_broken"] += 1
+
+    by_dep = []
+    for dep, refs in dep_referencers.items():
+        st, cls = resolution_cache.get(dep, ("?", None))
+        by_dep.append({"dep": dep, "kind": st, "class": cls,
+                       "referenced_by_count": len(refs), "referenced_by": sorted(refs)[:10]})
+    by_dep.sort(key=lambda r: (0 if r["kind"] == "redirector" else 1, -r["referenced_by_count"], r["dep"]))
+    result["by_dep"] = by_dep[:max_items]
+    result["broken_count"] = len(broken_rows)
+    result["missing_count"] = sum(1 for r in broken_rows if r["kind"] == "missing")
+    result["redirector_count"] = sum(1 for r in broken_rows if r["kind"] == "redirector")
+    result["broken"] = sorted(broken_rows, key=lambda r: (r["asset"], r["dep"]))[:max_items]
+    result["broken_truncated"] = len(broken_rows) > max_items
+    result["fixable_redirector_deps"] = sorted({r["dep"] for r in broken_rows if r["kind"] == "redirector"})
+    result["api"] = {"get_dependencies": (sorted(sigs) if sigs else None)}
+    return result
