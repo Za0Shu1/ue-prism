@@ -234,54 +234,78 @@ def _mesh_component(unreal, actor):
 
 
 def _override_count(unreal, actor, tried):
-    """材质覆盖数：逐槽比对"组件解析后的材质"与"网格默认槽材质"。
+    """材质覆盖数：只认"这个 Actor 自己改过的槽"，不认引擎代入的默认材质。
 
-    5.4 真机教训：`StaticMeshComponent.get_materials()` 返回的是解析后的槽材质（含网格
-    默认值），拿它的长度当"覆盖数"会把没覆盖的 Actor 全判成有覆盖，整组被闸门拒收。
-    返回 None 表示判不准（默认槽读不到）——上层按"未知"记账并放行，不假装成 0。
+    5.4 真实工程两次踩点：
+      1) 数 `get_materials()` 长度 = 解析后的全部槽材质（含默认值）-> 无覆盖也报有覆盖；
+      2) 拿 `get_material(i)` 与网格 `static_materials[i].material_interface`（槽声明，
+         引擎 Cube 上是 None/DefaultMaterial）比对 -> 引擎把默认材质代入解析，1500 个
+         散装 Cube 全被误判成有覆盖，折叠闸门恒拒。
+    所以优先级：override_materials（字面意义上的覆盖数组）> 组件与网格双侧
+    `get_material(i)` 同口径比对 > 判不准返回 None（上层按未知记账并放行）。
     """
     comp = _mesh_component(unreal, actor)
     if comp is None:
         return None
+    direct, key, _sub = _u.get_prop_any(comp, ("override_materials",))
+    if direct is not None:
+        tried.append("override_materials:%s" % key)
+        try:
+            return sum(1 for m in list(direct) if m is not None)
+        except Exception:
+            return None
     mesh = _u.prop(comp, "static_mesh")
     if mesh is None:
         return None
-    defaults, api, _sub, unreadable = _u.mesh_materials(unreal, mesh)
-    if unreadable or not defaults:
-        tried.append("override_probe:defaults_unreadable")
-        return None
-    paths = []
-    for mat in defaults:
-        try:
-            paths.append(str(mat.get_path_name()))
-        except Exception:
-            paths.append(None)
     total = None
-    for call in (lambda: comp.get_num_materials(), lambda: len(comp.get_materials())):
+    for call in (lambda: comp.get_num_materials(),
+                 lambda: len(comp.get_materials()),
+                 lambda: int(mesh.get_num_sections(0))):
         try:
-            total = int(call())
-            break
+            value = int(call())
         except Exception:
             continue
+        if value:
+            total = value
+            break
     if not total:
         tried.append("override_probe:slot_count_unreadable")
         return None
+
+    def path_of(obj):
+        if obj is None:
+            return None
+        try:
+            return str(obj.get_path_name())
+        except Exception:
+            return None
+
     hits = 0
+    unknown = 0
     for index in range(total):
         try:
-            resolved = comp.get_material(index)
+            on_comp = comp.get_material(index)
         except Exception:
-            tried.append("override_probe:get_material_unavailable")
+            tried.append("override_probe:comp.get_material_unavailable")
             return None
-        if resolved is None:
-            continue
         try:
-            got = str(resolved.get_path_name())
+            on_mesh = mesh.get_material(index)
         except Exception:
-            return None
-        base = paths[index] if index < len(paths) else None
-        if base is None or got != base:
+            tried.append("override_probe:mesh.get_material_unavailable")
+            on_mesh = None
+        comp_path = path_of(on_comp)
+        mesh_path = path_of(on_mesh)
+        if on_comp is None:
+            continue
+        if mesh_path is None:
+            unknown += 1
+            continue
+        if comp_path != mesh_path:
             hits += 1
+    if hits == 0 and unknown:
+        tried.append("override_probe:%d/%d_slots_unreadable" % (unknown, total))
+        return None
+    tried.append("override_probe:resolved_vs_mesh")
     return hits
 
 

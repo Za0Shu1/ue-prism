@@ -142,15 +142,23 @@ class _Slot(object):
 
 
 class _MeshObj(object):
-    """网格替身：5.4 实证材质槽来自 static_materials[i].material_interface。"""
+    """网格替身。declares_none=True 模拟引擎 BasicShapes：槽位声明为 None，
+    但组件解析时会被代入默认材质（真实误判源头）。"""
 
-    def __init__(self, package, default_mat=None):
+    def __init__(self, package, default_mat=None, declares_none=False):
         self.package = package
         self.default_mat = default_mat or _MeshMat("/Engine/EngineMaterials/DefaultMaterial")
-        self.static_materials = [_Slot(self.default_mat)]
+        self.static_materials = [_Slot(None if declares_none else self.default_mat)]
+        self._declares_none = declares_none
 
     def get_path_name(self):
         return self.package + "." + self.package.rsplit("/", 1)[-1]
+
+    def get_num_sections(self, lod):
+        return 1
+
+    def get_material(self, index):
+        return None if self._declares_none else self.default_mat
 
 
 class _MeshMat(object):
@@ -162,11 +170,18 @@ class _MeshMat(object):
 
 
 class StaticMeshComponent(object):
-    """组件替身：get_material(i) 返回"解析后"的材质（覆盖优先，否则网格默认）。"""
+    """组件替身：override_materials 是 5.4 的权威覆盖数组；get_material(i) 返回解析值。
 
-    def __init__(self, mesh, override=None):
+    expose_overrides=False 模拟读不到数组的旧/漂移签名，逼出"同口径比对"兜底。
+    """
+
+    def __init__(self, mesh, override=None, expose_overrides=True,
+                 resolved_default=None):
         self.static_mesh = mesh
         self._override = override
+        self.resolved_default = resolved_default
+        if expose_overrides:
+            self.override_materials = [override]
 
     def get_class(self):
         return _Cls("StaticMeshComponent")
@@ -177,6 +192,8 @@ class StaticMeshComponent(object):
     def get_material(self, index):
         if self._override is not None:
             return self._override
+        if self.resolved_default is not None:
+            return self.resolved_default
         return self.static_mesh.default_mat if self.static_mesh else None
 
     def get_materials(self):
@@ -420,12 +437,16 @@ def _make_unreal(world, tmp_path):
     return mod
 
 
-def _seed_world(cube=7, sphere=3, overrides=()):
+def _seed_world(cube=7, sphere=3, overrides=(), expose_overrides=True,
+                declares_none=False, resolved_default=None):
     world = _World()
     for i in range(cube):
         override = _MeshMat("/Game/Mats/M_Different") if "Cube_%d" % i in overrides else None
         world.actors.append(_Actor(world, "Cube_%d" % i, "StaticMeshActor",
-                                   [StaticMeshComponent(_MeshObj(CUBE), override)],
+                                   [StaticMeshComponent(_MeshObj(CUBE, declares_none=declares_none),
+                                                        override,
+                                                        expose_overrides=expose_overrides,
+                                                        resolved_default=resolved_default)],
                                    (float(i), 0.0, 0.0)))
     for i in range(sphere):
         world.actors.append(_Actor(world, "Sph_%d" % i, "StaticMeshActor",
@@ -513,13 +534,21 @@ def test_restore_rejects_a_broken_manifest(fake_engine, tmp_path):
     assert res["executed"] is False and "清单" in res["note"]
 
 
-def test_real_override_blocks_collapse_but_default_does_not(monkeypatch, tmp_path):
-    """覆盖判定必须逐槽比对默认材质：数 get_materials() 长度会误拒整组（5.4 真机踩点）。"""
+def test_override_gate_uses_the_real_override_array_not_resolved_slots(monkeypatch, tmp_path):
+    """四态钉死 5.4 材质覆盖判定（真机两次踩点：误判让折叠闸门恒拒）。
+
+    1) override_materials=[None]         -> 0 覆盖，放行
+    2) override_materials=[别的材质]     -> 1 覆盖，整组拒收
+    3) 读不到数组、组件与网格双侧解析同值 -> 0 覆盖（resolved_vs_mesh 兜底命中）
+    4) 读不到数组、网格槽声明为 None（引擎 BasicShapes 实况）
+       -> 判不准：不得当覆盖拒收，走 material_override_unknown 记账放行
+    """
     clean = _seed_world(cube=6)
     monkeypatch.setitem(sys.modules, "unreal", _make_unreal(clean, tmp_path))
     res = oh.opt_collapse_hism(min_count=5, limit=5)["result"]
     assert res["total"] == 1 and res["material_override_refused"] == 0
     assert res["groups"][0]["material_overrides"] == 0
+    assert "override_materials:override_materials" in res["tried"]
 
     dirty = _seed_world(cube=6, overrides={"Cube_2"})
     monkeypatch.setitem(sys.modules, "unreal", _make_unreal(dirty, tmp_path))
@@ -528,14 +557,18 @@ def test_real_override_blocks_collapse_but_default_does_not(monkeypatch, tmp_pat
     assert res2["refused_groups"][0]["reason"] == "material_overrides"
     assert res2["refused_groups"][0]["material_overrides"] == 1
 
-    unreadable = _seed_world(cube=6)
-    for actor in unreadable.actors:
-        if actor.get_actor_label().startswith("Cube"):
-            actor._comps[0].static_mesh.static_materials = []
-    monkeypatch.setitem(sys.modules, "unreal", _make_unreal(unreadable, tmp_path))
+    same = _seed_world(cube=6, expose_overrides=False)
+    monkeypatch.setitem(sys.modules, "unreal", _make_unreal(same, tmp_path))
     res3 = oh.opt_collapse_hism(min_count=5, limit=5)["result"]
-    assert res3["total"] == 1, "默认槽读不到=未知，保守放行但要记账"
-    assert res3["material_override_unknown"] == 6
+    assert res3["total"] == 1 and "override_probe:resolved_vs_mesh" in res3["tried"]
+
+    engine_cube = _seed_world(cube=6, expose_overrides=False, declares_none=True,
+                              resolved_default=_MeshMat("/Engine/EngineMaterials/WorldGridMaterial"))
+    monkeypatch.setitem(sys.modules, "unreal", _make_unreal(engine_cube, tmp_path))
+    res4 = oh.opt_collapse_hism(min_count=5, limit=5)["result"]
+    assert res4["total"] == 1, "引擎代入默认材质不等于美术覆盖，不得拒收整组"
+    assert res4["material_override_unknown"] == 6
+    assert any("slots_unreadable" in t for t in res4["tried"])
 
 
 def test_collapse_refuses_when_hism_component_is_unreachable(monkeypatch, tmp_path):
