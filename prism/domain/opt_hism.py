@@ -22,10 +22,36 @@ from . import optutil as _u
 from . import register
 
 OP = "opt_collapse_hism"
+# 折叠容器：5.4 真机没有 AHierarchicalStaticMeshActor 这个 Actor 类
+# （UnrealEditor-Engine.dll 的名字表里查无此类），引擎自己的 Instancing 工具走的是
+# "裸 AActor + InstancedStaticMesh 组件"。所以先按专用 Actor 类试（兼容真有该类的
+# 版本），拿不到就退回 5.4 实证路线。
 HISM_CLASS = "HierarchicalStaticMeshActor"
+_HISM_ACTOR_CLASS_NAMES = ("HierarchicalStaticMeshActor", "InstancedStaticMeshActor")
+_HISM_COMP_CLASS_NAMES = ("HierarchicalInstancedStaticMeshComponent",
+                          "HierarchicalStaticMeshComponent")
+_HISM_COMP_NAME = "PrismHISMComponent"
+
+
+def _mesh_stem(package_path):
+    """网格包路径 -> Actor 标签用的短名（/Engine/BasicShapes/Cube.Cube -> Cube）。"""
+    text = str(package_path or "")
+    name = text.rsplit("/", 1)[-1]
+    name = name.split(".")[-1]
+    return name or "HISM"
 STATIC_MESH_ACTOR = _oi.STATIC_MESH_ACTOR
 MANIFEST_VERSION = 1
 _ORIGIN = (0.0, 0.0, 0.0)
+
+# 引擎隐式默认材质（包裹路径）：出现在覆盖数组里不代表作者改过材质。
+# 网格材质槽声明为 None 时，组件解析值与数组预填值代入的就是这一族，
+# 比路径时把它们视作同一个默认外观，否则整组散装网格会被误判成有覆盖。
+_ENGINE_DEFAULT_MATERIALS = frozenset([
+    "/Engine/EngineMaterials/WorldGridMaterial",
+    "/Engine/BasicShapes/BasicShapeMaterial",
+    "/Engine/EngineMaterials/DefaultMaterial",
+    "/Engine/EngineMaterials/InvalidMaterial",
+])
 
 
 def _int(value, default):
@@ -47,8 +73,16 @@ def _base(mode, dry_run):
             "universe": 0, "scanned": 0, "total": 0, "truncated": False,
             "cap": 0, "note": None, "tried": [], "level_saved": False,
             "scope": {"mode": str(mode or "plan")},
-            "manifest_path": None, "rollback_available": False}
+            "manifest_path": None, "rollback_available": False,
+            "restore_mesh_missing": 0, "failed_truncated": False}
 
+
+def _fail(result, row, cap=20):
+    """failed \u660e\u7ec6\u6709\u4e0a\u9650\uff1a1500 \u4e2a\u540c\u7c7b\u9519\u8bef\u4e0d\u8be5\u628a\u4fe1\u5c01\u6491\u7206\uff0c\u4f46\u8ba1\u6570\u7167\u5e38\u8d70\u3002"""
+    if len(result["failed"]) < cap:
+        result["failed"].append(row)
+    else:
+        result["failed_truncated"] = True
 
 def _select_groups(rows, mesh=None, min_count=5, limit=20,
                    allow_blockers=False, allow_material_overrides=False,
@@ -233,18 +267,70 @@ def _mesh_component(unreal, actor):
     return None
 
 
-def _override_count(unreal, actor, tried):
-    """材质覆盖数：只统计"和网格自身材质不一样"的槽。
+def _note(tried, text):
+    """per-actor 诊断只记一次：1500 个 Actor 不该把 tried 刷成 1500 行。"""
+    if text not in tried:
+        tried.append(text)
 
-    5.4 真机三连踩点，口径演进：
-      1) 数 `get_materials()` 长度 = 解析后全部槽材质 -> 无覆盖也报有覆盖；
-      2) 组件解析值 vs 网格 `static_materials[i].material_interface`（槽声明）
+
+def _mat_path(obj):
+    """材质对象到对象路径；读不到返回 None，跨版本签名漂移时不崩。"""
+    if obj is None:
+        return None
+    try:
+        return str(obj.get_path_name())
+    except Exception:
+        return None
+
+
+def _mat_pkg(path):
+    """对象路径到包裹路径：/Engine/Foo/Bar.Bar 去掉导出名；None 原样返回。"""
+    if not path:
+        return None
+    return path.split(".")[0]
+
+
+def _mat_is_engine_default(path):
+    return _mat_pkg(path) in _ENGINE_DEFAULT_MATERIALS
+
+
+def _slot_deviates(candidate, base):
+    """单个槽是否偏离网格自身材质，返回 (deviates, decided)。
+
+    decided=False 表示判不准（基线或候选读不到），上层走 unknown 通道放行加记账，
+    不得当覆盖拒收。判等从宽到严三档：整路径相同；同包裹不同导出名（同名导出的
+    变体对象）；两侧都是引擎隐式默认材质。第三档是 5.4 引擎 Cube 的实况：网格槽
+    声明为 None 时，编辑器往覆盖数组预填的是 WorldGridMaterial，而网格侧给的是
+    BasicShapeMaterial，同一个默认外观两条路径，不认这条就会把整组误判成有覆盖。
+    """
+    cp = _mat_path(candidate)
+    if cp is None:
+        return False, False
+    bp = _mat_path(base)
+    if bp is None:
+        if _mat_is_engine_default(cp):
+            return False, True
+        return False, False
+    if cp == bp or _mat_pkg(cp) == _mat_pkg(bp):
+        return False, True
+    if _mat_is_engine_default(cp) and _mat_is_engine_default(bp):
+        return False, True
+    return True, True
+
+
+def _override_count(unreal, actor, tried):
+    """材质覆盖数：只统计和网格自身材质不一样的槽。
+
+    5.4 真机四连踩点，口径演进：
+      1) 数 get_materials() 长度 = 解析后全部槽材质 -> 无覆盖也报有覆盖；
+      2) 组件解析值比网格 static_materials[i].material_interface 槽声明
          -> 引擎 BasicShapes 槽声明为 None、解析时代入默认材质，误判；
-      3) 直接数 `override_materials` 里的非空项 -> 编辑器会把网格自身材质预填进
-         覆盖数组（1500 个散装 Cube 全"有覆盖"），还是误判。
-    正解：取候选材质（override_materials[i]，取不到再用组件 get_material(i)），
-    与网格自身材质（mesh.get_material(i)，取不到再用槽声明）比路径；
-    相等 = 没有偏离，不计；基线取不到 = 判不准，走 unknown 通道（放行 + 计数）。
+      3) 直接数 override_materials 里的非空项 -> 编辑器把网格自身材质预填进
+         覆盖数组（1500 个散装 Cube 全被报有覆盖），还是误判；
+      4) 候选与 mesh.get_material(i) 逐路径比 -> 引擎 Cube 预填 WorldGridMaterial，
+         网格侧返回 BasicShapeMaterial，同一默认外观两条路径，仍然误判。
+    正解：同口径比路径，判等规则见 _slot_deviates；判不准走 unknown 通道；真偏离
+    时留最多 3 条 mismatch 证据，下次误判能直接看出是哪两条路径在打架。
     """
     comp = _mesh_component(unreal, actor)
     if comp is None:
@@ -266,22 +352,17 @@ def _override_count(unreal, actor, tried):
             total = int(value)
             break
     if not total:
-        tried.append("override_probe:slot_count_unreadable")
+        _note(tried, "override_probe:slot_count_unreadable")
         return None
 
-    def path_of(obj):
-        if obj is None:
-            return None
-        try:
-            return str(obj.get_path_name())
-        except Exception:
-            return None
+    if direct is not None:
+        _note(tried, "override_source:override_materials")
+    else:
+        _note(tried, "override_source:comp.get_material")
 
     slot_defaults = None
-    if direct is not None:
-        tried.append("override_source:override_materials")
-    else:
-        tried.append("override_source:comp.get_material")
+    defaults, _api, _sub2, unreadable = _u.mesh_materials(unreal, mesh)
+    slot_defaults = defaults if not unreadable else None
 
     def mesh_base(index):
         try:
@@ -297,11 +378,9 @@ def _override_count(unreal, actor, tried):
         except Exception:
             return None
 
-    defaults, _api, _sub2, unreadable = _u.mesh_materials(unreal, mesh)
-    slot_defaults = defaults if not unreadable else None
-
     hits = 0
     unknown = 0
+    evidence = []
     for index in range(total):
         candidate = None
         if direct is not None:
@@ -313,22 +392,25 @@ def _override_count(unreal, actor, tried):
             try:
                 candidate = comp.get_material(index)
             except Exception:
-                tried.append("override_probe:comp.get_material_unavailable")
+                _note(tried, "override_probe:comp.get_material_unavailable")
                 return None
         if candidate is None:
             continue
         base = mesh_base(index)
-        base_path = path_of(base)
-        if base_path is None:
+        deviates, decided = _slot_deviates(candidate, base)
+        if not decided:
             unknown += 1
             continue
-        if path_of(candidate) != base_path:
+        if deviates:
             hits += 1
+            if len(evidence) < 3:
+                evidence.append("%s!=%s" % (_mat_path(candidate), _mat_path(base)))
+    if evidence:
+        _note(tried, "override_mismatch:%d:%s" % (hits, ";".join(evidence)))
     if hits == 0 and unknown:
-        tried.append("override_probe:%d/%d_baseline_unreadable" % (unknown, total))
+        _note(tried, "override_probe:%d/%d_baseline_unreadable" % (unknown, total))
         return None
     return hits
-
 
 def _actor_record(unreal, actor, tried):
     """保真采集：回滚需要类/网格/变换/标签/子关卡，其余（碰撞、光照绑定）不承诺。"""
@@ -430,22 +512,137 @@ def _spawn_actor(unreal, world, class_name, location, rotation, tried, evidence)
     return None
 
 
+def _hism_comp_class(unreal):
+    """HISM 组件类名：5.4 实证是 HierarchicalInstancedStaticMeshComponent。
+
+    HierarchicalStaticMeshComponent 这个"想当然"的写法在 5.4 根本不存在
+    （dir(unreal) 里没有，UnrealEditor-Engine.dll 的名字表里也没有），
+    照它找组件会永远 miss；这里按真机名优先、旧猜测名兜底。
+    """
+    for name in _HISM_COMP_CLASS_NAMES:
+        cls = getattr(unreal, str(name), None)
+        if cls is not None:
+            return cls, str(name)
+    return None, None
+
+
 def _hism_component(unreal, actor, tried):
-    probes = [
-        lambda: actor.get_component_by_class(unreal.HierarchicalStaticMeshComponent),
-        lambda: actor.get_component_by_class(unreal.InstancedStaticMeshComponent),
-        lambda: getattr(actor, "instanced_static_mesh_component", None),
-        lambda: actor.get_components_by_class(unreal.ActorComponent)[0],
-    ]
-    for call in probes:
+    cls, _hit = _hism_comp_class(unreal)
+    probes = []
+    if cls is not None:
+        probes.append(("by_class", lambda: actor.get_component_by_class(cls)))
+    ism = getattr(unreal, "InstancedStaticMeshComponent", None)
+    if ism is not None:
+        probes.append(("by_ism_base", lambda: actor.get_component_by_class(ism)))
+    probes.append(("by_named_prop",
+                   lambda: getattr(actor, "instanced_static_mesh_component", None)))
+    probes.append(("first_component",
+                   lambda: (actor.get_components_by_class(unreal.ActorComponent) or [None])[0]))
+    for label, call in probes:
         try:
             comp = call()
         except Exception:
             continue
         if comp is not None:
+            _note(tried, "hism_component:%s" % label)
             return comp
     tried.append("hism_component:miss")
     return None
+
+
+def _attach_hism_component(unreal, actor, tried):
+    """给裸 Actor 挂一个 HISM 根组件（5.4 真机实测口径）。
+
+    5.4 的 Python 侧没有 Actor.add_component_by_class（C++ 那版是
+    ScriptNoExport/BlueprintInternalUseOnly，不进脚本绑定），unreal.new_object
+    才是可行入口：以 Actor 为 outer 造组件，再把 root_component 指过去。
+    存盘重载后组件与实例都还在（probe_persist 实测 3 个实例存活），
+    所以这条路不是"内存里糊弄一下"，是真的能落地到 .umap。
+    """
+    cls, hit = _hism_comp_class(unreal)
+    if cls is None:
+        _note(tried, "hism_comp_class:missing")
+        return None
+    comp = None
+    for label, call in (("named", lambda: unreal.new_object(
+        cls, actor, _HISM_COMP_NAME)),
+        ("anon", lambda: unreal.new_object(cls, actor))):
+        try:
+            comp = call()
+        except Exception as exc:
+            _note(tried, "new_object_hism:%s(%s)" % (label, type(exc).__name__))
+            continue
+        if comp is not None:
+            _note(tried, "new_object_hism:%s(%s)" % (label, hit))
+            break
+    if comp is None:
+        return None
+    ok, prop_hit, _sub = _u.set_prop_any(actor, ("root_component",), comp)
+    if ok:
+        _note(tried, "root_component:%s" % prop_hit)
+    else:
+        try:
+            actor.set_root_component(comp)
+            _note(tried, "set_root_component")
+        except Exception as exc:
+            _note(tried, "root_component:miss(%s)" % type(exc).__name__)
+    return comp
+
+
+def _make_hism_actor(unreal, world, tried):
+    """造折叠容器：优先专用 Actor 类，没有就裸 Actor + HISM 根组件。
+
+    返回 (actor, comp, path)；path 进清单与 tried，让"这版引擎走的哪条路"可追。
+    """
+    for cls_name in _HISM_ACTOR_CLASS_NAMES:
+        actor = _spawn_actor(unreal, world, cls_name, unreal.Vector(*_ORIGIN),
+                             _rotator(unreal, _ORIGIN, tried), tried, None)
+        if actor is None:
+            continue
+        comp = _hism_component(unreal, actor, tried)
+        if comp is not None:
+            return actor, comp, "actor_class:%s" % cls_name
+        _destroy(unreal, world, actor, tried)
+        _note(tried, "actor_class:%s:no_component" % cls_name)
+    actor = _spawn_actor(unreal, world, "Actor", unreal.Vector(*_ORIGIN),
+                         _rotator(unreal, _ORIGIN, tried), tried, None)
+    if actor is None:
+        return None, None, "plain_actor:spawn_failed"
+    comp = _attach_hism_component(unreal, actor, tried)
+    if comp is None:
+        _destroy(unreal, world, actor, tried)
+        return None, None, "plain_actor:attach_failed"
+    return actor, comp, "plain_actor+new_object"
+
+
+def _copy_component_fidelity(unreal, source, comp, tried):
+    """把源组件的碰撞/阴影/可移动性抄给新组件（读不到就跳过，不假装一致）。
+
+    折叠承诺的是网格与变换；这三项决定"看着一样但点不动/没影子"，
+    所以尽力保真，并把没保住的项如实记进 tried。
+    """
+    if source is None:
+        _note(tried, "fidelity:no_source_component")
+        return []
+    missing = []
+    for prop in ("mobility", "b_cast_shadow", "collision_profile_name"):
+        try:
+            value = source.get_editor_property(prop)
+        except Exception:
+            missing.append(prop)
+            continue
+        if value is None:
+            missing.append(prop)
+            continue
+        try:
+            comp.set_editor_property(prop, value)
+        except Exception:
+            missing.append(prop)
+            continue
+        _note(tried, "fidelity:%s" % prop)
+    if missing:
+        _note(tried, "fidelity_skipped:%s" % ",".join(missing))
+    return missing
 
 
 def _set_component_mesh(comp, mesh_obj, tried):
@@ -465,28 +662,56 @@ def _set_component_mesh(comp, mesh_obj, tried):
 
 
 def _add_instances(comp, transforms, tried):
-    for label, call in (("add_instances", lambda: comp.add_instances(transforms)),
-                        ("add_instances2", lambda: comp.add_instances(transforms, False))):
+    """批量写实例：5.4 实测口径，计数不信返回值。
+
+    真机针对本函数的两个坑：单参数 add_instances(list) 直接 TypeError
+    （绑定的是 (transforms, bWorldSpace) 双参）；双参能成但返回的是空列表，
+    所以写入数只能取前后 get_instance_count() 的差。源变换取自
+    actor.get_actor_transform()（世界空间），故 world-space 优先；引擎不接再退
+    local-space（容器落在原点，两者等价），最后才逐实例兜底。
+    """
+    if not transforms:
+        return 0
+    before = _instance_count(comp)
+    for label, world_space in (("world", True), ("local", False)):
         try:
-            call()
+            comp.add_instances(transforms, world_space)
         except Exception as exc:
-            tried.append("%s:%s" % (label, type(exc).__name__))
+            _note(tried, "add_instances_%s:%s" % (label, type(exc).__name__))
             continue
-        tried.append(label)
-        return len(transforms)
+        _note(tried, "add_instances:%s" % label)
+        return _added_count(comp, before, len(transforms))
+    try:
+        comp.add_instances(transforms)
+    except Exception as exc:
+        _note(tried, "add_instances_one_arg:%s" % type(exc).__name__)
+    else:
+        _note(tried, "add_instances:one_arg")
+        return _added_count(comp, before, len(transforms))
     done = 0
     for transform in transforms:
         for call in (lambda: comp.add_instance(transform, True),
+                     lambda: comp.add_instance(transform, False),
                      lambda: comp.add_instance(transform)):
             try:
                 call()
                 done += 1
                 break
             except Exception as exc:
-                tried.append("add_instance:%s" % type(exc).__name__)
+                _note(tried, "add_instance:%s" % type(exc).__name__)
     if done:
-        tried.append("add_instance(loop)")
+        _note(tried, "add_instance(loop)")
     return done
+
+
+def _added_count(comp, before, wanted):
+    """实例数以 get_instance_count() 为准；读不到才退回 wanted。"""
+    after = _instance_count(comp)
+    if after is None:
+        return wanted
+    if before is None:
+        return after
+    return max(0, after - before)
 
 
 def _instance_count(comp):
@@ -676,33 +901,47 @@ def _collapse(unreal, world, live, buckets, selection, result, tried, manifest):
         recs = buckets.get(mesh_path) or []
         row = result["groups"][index]
         transforms = []
+        unreadable = 0
         for rec in recs:
             actor = live.get(rec["name"])
             if actor is None:
-                result["failed"].append({"mesh": mesh_path, "actor": rec["name"],
-                                         "note": "actor_lost"})
+                _fail(result, {"mesh": mesh_path, "actor": rec["name"],
+                          "note": "actor_lost"})
+                unreadable += 1
                 continue
             try:
                 transforms.append(actor.get_actor_transform())
             except Exception as exc:
-                tried.append("get_actor_transform:%s" % type(exc).__name__)
-        actor = _spawn_actor(unreal, world, HISM_CLASS, unreal.Vector(*_ORIGIN),
-                             _rotator(unreal, _ORIGIN, tried), tried, None)
-        if actor is None:
-            row["note"] = "spawn_hism_failed"
-            result["failed"].append({"mesh": mesh_path, "note": "spawn_hism_failed"})
+                _note(tried, "get_actor_transform:%s" % type(exc).__name__)
+                unreadable += 1
+        # 有一个源的世界变换读不到就整组不动：宁可保持原样，也不能
+        # "折叠成功"后发现少了几个实例——那几个 Actor 已经被销毁了。
+        if unreadable:
+            row["note"] = "transform_unreadable:%d" % unreadable
+            result["failed"].append({"mesh": mesh_path, "note": "transform_unreadable",
+                                     "actors": unreadable})
             continue
-        comp = _hism_component(unreal, actor, tried)
-        if comp is None:
-            _destroy(unreal, world, actor, tried)
-            result["failed"].append({"mesh": mesh_path, "note": "hism_component_missing"})
+        actor, comp, spawn_path = _make_hism_actor(unreal, world, tried)
+        if actor is None or comp is None:
+            row["note"] = "spawn_hism_failed"
+            result["failed"].append({"mesh": mesh_path, "note": "spawn_hism_failed",
+                                     "path": spawn_path})
             continue
         mesh_obj = _load_mesh(unreal, mesh_path, tried)
         if mesh_obj is None or not _set_component_mesh(comp, mesh_obj, tried):
             _destroy(unreal, world, actor, tried)
             result["failed"].append({"mesh": mesh_path, "note": "set_mesh_failed"})
             continue
+        _copy_component_fidelity(unreal, _mesh_component(unreal, live.get(recs[0]["name"]))
+                                 if recs else None, comp, tried)
         added = _add_instances(comp, transforms, tried)
+        # 实例没写满就销毁源 Actor 等于丢几何，必须把容器收回去、整组退回
+        if added < len(transforms):
+            _destroy(unreal, world, actor, tried)
+            row["note"] = "instance_write_short"
+            result["failed"].append({"mesh": mesh_path, "note": "instance_write_short",
+                                     "added": added, "wanted": len(transforms)})
+            continue
         count = _instance_count(comp)
         if count is not None and count < added:
             tried.append("instance_count_short:%s<%s" % (count, added))
@@ -725,14 +964,21 @@ def _collapse(unreal, world, live, buckets, selection, result, tried, manifest):
         except Exception:
             pass
         try:
-            actor.mark_actor_dirty()
+            actor.set_actor_label("%s_HISM" % _mesh_stem(mesh_path))
         except Exception:
             pass
+        for dirty in (lambda: actor.modify(), lambda: comp.modify(),
+                      lambda: actor.mark_actor_dirty()):
+            try:
+                dirty()
+            except Exception:
+                continue
         row["hism_actor"] = hism_name
+        row["spawn_path"] = spawn_path
         row["instanced"] = added
         row["destroyed"] = gone
         payload["groups"].append({"mesh": mesh_path, "hism_actor": hism_name,
-                                  "hism_class": HISM_CLASS, "instances": added,
+                                  "hism_class": spawn_path, "instances": added,
                                   "sources": recs})
     result["executed"] = True
     result["groups_planned"] = len(selection["groups"])
@@ -766,11 +1012,11 @@ def _collapse(unreal, world, live, buckets, selection, result, tried, manifest):
 def _restore(unreal, world, result, tried, confirm):
     path = result["filters"].get("manifest")
     if not path:
-        result["note"] = "mode=restore 需 manifest=<折叠时写的清单路径>"
+        result["note"] = "mode=restore \u9700 manifest=<\u6298\u53e0\u65f6\u5199\u7684\u6e05\u5355\u8def\u5f84>"
         return envelope.make_ok(result)
     payload = _read_manifest(path)
     if payload is None:
-        result["note"] = "清单读不到或结构不符：%s" % path
+        result["note"] = "\u6e05\u5355\u8bfb\u4e0d\u5230\u6216\u7ed3\u6784\u4e0d\u7b26\uff1a%s" % path
         return envelope.make_ok(result)
     result["manifest_path"] = str(path)
     sources = []
@@ -783,8 +1029,8 @@ def _restore(unreal, world, result, tried, confirm):
                          "actors": len(g.get("sources") or [])}
                         for g in payload["groups"]]
     if _u.to_bool(result["dry_run"], True):
-        result["note"] = ("dry_run：可按清单重建 %d 个源 Actor、销毁 %d 个 HISM。"
-                          "落盘需 dry_run=False 且 confirm=True。"
+        result["note"] = ("dry_run\uff1a\u53ef\u6309\u6e05\u5355\u91cd\u5efa %d \u4e2a\u6e90 Actor\u3001\u9500\u6bc1 %d \u4e2a HISM\u3002"
+                          "\u843d\u76d8\u9700 dry_run=False \u4e14 confirm=True\u3002"
                           % (len(sources), len(payload["groups"])))
         return envelope.make_ok(result)
     names = _refresh_names(unreal)
@@ -793,12 +1039,13 @@ def _restore(unreal, world, result, tried, confirm):
         location = unreal.Vector(*[float(v) for v in (rec.get("location") or _ORIGIN)])
         rotation = _rotator(unreal, rec.get("rotation") or _ORIGIN, tried)
         if rotation is None:
-            result["failed"].append({"actor": rec.get("name"), "note": "rotator_failed"})
+            _fail(result, {"actor": rec.get("name"), "note": "rotator_failed"})
             continue
-        actor = _spawn_actor(unreal, world, rec.get("class") or STATIC_MESH_ACTOR,
-                             location, rotation, tried, None)
+        class_name = rec.get("class") or STATIC_MESH_ACTOR
+        actor = _spawn_actor(unreal, world, class_name, location, rotation, tried, None)
         if actor is None:
-            result["failed"].append({"actor": rec.get("name"), "note": "spawn_failed"})
+            _fail(result, {"actor": rec.get("name"), "note": "spawn_failed",
+                           "class": class_name})
             continue
         result["recreated"] = result.get("recreated", 0) + 1
         recreated += 1
@@ -813,15 +1060,10 @@ def _restore(unreal, world, result, tried, confirm):
                 continue
         mesh_path = rec.get("mesh")
         if mesh_path:
-            mesh_obj = _load_mesh(unreal, mesh_path, tried)
-            if mesh_obj is not None:
-                for call in (lambda: actor.set_static_mesh(mesh_obj),
-                             lambda: _u.set_prop_any(actor, ("static_mesh",), mesh_obj)):
-                    try:
-                        call()
-                        break
-                    except Exception:
-                        continue
+            # \u7f51\u683c\u53ea\u8ba4\u56de\u8bfb\uff0c\u4e0d\u4fe1\u8c03\u7528\u6ca1\u62a5\u9519\uff1aAActor \u65e2\u6ca1\u6709 static_mesh \u5c5e\u6027\uff0c
+            # \u4e5f\u6ca1\u6709 set_static_mesh \u65b9\u6cd5\uff085.4 \u771f\u673a\u8e29\u8fc7\u2014\u2014\u56de\u6eda\u62a5 success\uff0c\u5374\u7559\u4e0b 1500
+            # \u4e2a\u7a7a Actor\uff09\u3002\u6b63\u786e\u5bf9\u8c61\u662f\u5b83\u7684 StaticMeshComponent\uff0c\u5199\u5b8c\u7528 _mesh_probe \u56de\u8bfb\u6bd4\u5bf9\u3002
+            _write_back_mesh(unreal, actor, str(mesh_path), result, tried)
         if rec.get("label"):
             for call in (lambda: actor.set_actor_label(str(rec["label"])),
                          lambda: _u.set_prop_any(actor, ("actor_label",), str(rec["label"]))):
@@ -844,11 +1086,54 @@ def _restore(unreal, world, result, tried, confirm):
     result["executed"] = True
     result["changed"] = recreated
     result["actors_destroyed"] = destroyed
-    result["success"] = recreated > 0 and len(result["failed"]) == 0
+    result["success"] = (recreated > 0 and not result["failed"]
+                         and result["restore_mesh_missing"] == 0)
     saved = _save_level(unreal, tried)
     result["level_saved"] = bool(saved)
-    result["note"] = ("已重建 %d 个源 Actor（清单记录 %d），销毁 HISM %d 个；关卡%s。"
-                      "细节属性（碰撞/光照绑定）不承诺完全复原。"
-                      % (recreated, len(sources), destroyed,
-                         "已保存" if saved else "未保存"))
+    note = ("\u5df2\u91cd\u5efa %d \u4e2a\u6e90 Actor\uff08\u6e05\u5355\u8bb0\u5f55 %d\uff09\uff0c\u9500\u6bc1 HISM %d \u4e2a\uff1b\u5173\u5361%s\u3002"
+            % (recreated, len(sources), destroyed,
+               "\u5df2\u4fdd\u5b58" if saved else "\u672a\u4fdd\u5b58"))
+    if result["restore_mesh_missing"]:
+        note += ("\u8b66\u544a\uff1a%d \u4e2a\u91cd\u5efa\u51fa\u6765\u7684 Actor \u7f51\u683c\u6ca1\u5199\u8fdb\u53bb\uff08\u5f15\u64ce\u6ca1\u7ed9\u5230\u53ef\u5199\u7684 "
+                 "StaticMeshComponent \u63a5\u53e3\uff09\uff0c\u5b83\u4eec\u73b0\u5728\u662f\u7a7a\u58f3\uff0csuccess \u5df2\u7f6e False\uff1b"
+                 "\u91cd\u5efa\u5173\u5361\u526f\u672c\u6216\u624b\u5de5\u8865\u7f51\u683c\u540e\u518d\u7528\u3002"
+                 % result["restore_mesh_missing"])
+    note += "\u7ec6\u8282\u5c5e\u6027\uff08\u78b0\u649e/\u5149\u7167\u7ed1\u5b9a\uff09\u4e0d\u627f\u8bfa\u5b8c\u5168\u590d\u539f\u3002"
+    result["note"] = note
     return envelope.make_ok(result)
+
+
+def _write_back_mesh(unreal, actor, mesh_path, result, tried):
+    """\u628a\u6e05\u5355\u91cc\u7684\u7f51\u683c\u5199\u56de\u7ec4\u4ef6\u5e76\u56de\u8bfb\u6821\u9a8c\uff1b\u843d\u4e0d\u5230\u4f4d\u7f6e\u8bb0\u4e00\u7b14\u3002"""
+    actor_cls = ""
+    try:
+        actor_cls = str(actor.get_class().get_name())
+    except Exception:
+        pass
+
+    def landed():
+        return _ac._mesh_probe(unreal, actor, actor_cls)[0] == mesh_path
+
+    if landed():
+        return
+    mesh_obj = _load_mesh(unreal, mesh_path, tried)
+    if mesh_obj is not None:
+        sub = []
+        attempts = []
+        comp = _mesh_component(unreal, actor)
+        if comp is not None:
+            attempts.append(lambda comp=comp: _set_component_mesh(comp, mesh_obj, sub))
+        attempts.append(lambda: actor.set_static_mesh(mesh_obj))
+        attempts.append(lambda: _u.set_prop_any(actor, ("static_mesh",), mesh_obj))
+        for attempt in attempts:
+            try:
+                attempt()
+            except Exception as exc:
+                _note(tried, "restore_set_mesh:%s" % type(exc).__name__)
+            for item in sub:
+                _note(tried, item)
+            if landed():
+                break
+    if not landed():
+        result["restore_mesh_missing"] += 1
+        _fail(result, {"mesh": mesh_path, "note": "mesh_not_applied"})
