@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -132,12 +133,39 @@ def _migrate_move_roundtrip(r):
 
 
 
-def _migrate_copy_roundtrip(r):
+def _purge_stale_copies(project_dir):
+    """删掉上一轮崩溃/强关编辑器留下的复制靶残留目录（磁盘级，best-effort）。
+
+    5.4 真机实跑教训：`_pwtmp/copy` 残留会让本轮 `migrate_asset` 按同名冲突拒写，
+    把整组 copy 校验带走。复制靶本就是临时物，删之无损；工程无权限时静默跳过。
+    """
+    if not project_dir:
+        return []
+    root = os.path.join(project_dir, "Content", "PrismCalib", "_pwtmp")
+    if not os.path.isdir(root):
+        return []
+    removed = []
+    for name in sorted(os.listdir(root)):
+        path = os.path.join(root, name)
+        if not (name.startswith("copy") and os.path.isdir(path)):
+            continue
+        try:
+            shutil.rmtree(path)
+            removed.append(name)
+        except Exception:
+            pass
+    return removed
+
+
+def _migrate_copy_roundtrip(r, project_dir=None):
     """真机复制迁移校验：复制 M_CalibRef(硬引用 T_CalibRef) -> 应带走整条 /Game uses 闭包(2 包)。
     内存态(不 save)，关编辑器丢弃；验证 migrate_asset copy 的 get_asset_chain 闭包 + duplicate_asset
     落新包可解析 + 目标目录自动创建(make_directory 修复)。"""
     src = F + "/M_CalibRef"
-    dest = TMPDIR + "/copy"
+    # 每次跑用唯一 dest：注册表里从没出现过的名字 -> 冲突面必然为 0，
+    # "绿"不依赖环境干净（残留另有 purged 证据 + 下面的冲突拒写断言）。
+    dest = TMPDIR + "/copy_%d" % int(time.time())
+    purged = _purge_stale_copies(project_dir)
     base = r.call("describe_asset", {"asset_path": src})
     if not base.get("found"):
         r.check("migrate.copy_dryrun_plan", False, "baseline missing: %s" % base)
@@ -162,7 +190,53 @@ def _migrate_copy_roundtrip(r):
     r.check("migrate.copy_applies", ok_write,
             {"duplicated": wr.get("duplicated"), "of": wr.get("of"),
              "success": wr.get("success"), "root_found_after": root_found,
-             "dsts": dsts})
+             "dsts": dsts, "purged_stale": purged})
+    # 冲突面主动测：同一 dest 再写一次必须被拒（写操作铁律：宁可拒绝也不覆盖别人的资产）。
+    refused = None
+    try:
+        again = r.call("migrate_asset", {"asset_path": src, "dest_path": dest,
+                                         "dry_run": False, "confirm": True})
+        refused = "not_refused:%s" % json.dumps(
+            {"success": again.get("success"),
+             "collision_count": again.get("collision_count")}, ensure_ascii=False)
+    except Exception as exc:
+        refused = str(exc)
+    ok_refuse = bool(refused) and ("冲突" in refused or "conflict" in refused.lower())
+    r.check("migrate.copy_conflict_refused", ok_refuse, refused[:220])
+
+
+def _enumeration_checks(r):
+    """真机不变量：注册表枚举必须"一包一条"（5.4 真实工程实测缺陷的门禁）。
+
+    `get_assets_by_path` 对多导出包（HLOD 烘焙图集、子资产、BP 生成类）按 *导出* 返回
+    多条 AssetData。真实工程(9242 资产)里一个 HLOD 包重复 76 次，limit=400 的纹理窗口
+    被吃掉 124 格、同包重复度量，且按 `package.leaf` 定位的对象在该包内不存在 ->
+    125 项"读不到尺寸"失败，池需求被系统性低估。任何工程都该一包一条，故这条断言
+    对空工程/夹具工程同样成立（无纹理时按"不适用"放过，不假绿也不误红）。
+    """
+    scan, dt = _t(lambda: r.call("scan_texture_streaming",
+                                 {"folder": "/Game", "max_assets": 400, "top": 80}))
+    pkgs = [e.get("package") for e in (scan.get("items") or []) if e.get("package")]
+    dup_scan = sorted(set(p for p in pkgs if pkgs.count(p) > 1))
+    r.check("enumerate.scan_one_row_per_package", (not pkgs) or not dup_scan,
+            {"rows": len(pkgs), "duplicates": dup_scan[:5],
+             "universe": (scan.get("sampling") or {}).get("universe"),
+             "measured": (scan.get("summary") or {}).get("measured"),
+             "elapsed_s": dt})
+    dr = r.call("opt_texture_clamp_max_size", {"folder": "/Game", "max_size": 2048,
+                                               "limit": 400, "dry_run": True})
+    rows = dr.get("targets") or []
+    names = [x.get("package") for x in rows if x.get("package")]
+    dup = sorted(set(p for p in names if names.count(p) > 1))
+    failed = len(dr.get("failed") or [])
+    total = int(dr.get("total") or 0)
+    # 覆盖率：窗口里"读不到尺寸/加载失败"的占比必须小（修复前实测 125/281 ≈ 44%）
+    coverage_ok = total < 20 or failed <= total * 0.25
+    r.check("enumerate.opt_rows_unique_and_measurable",
+            ((not names) or (not dup)) and coverage_ok,
+            {"rows": total, "duplicates": dup[:5], "failed": failed,
+             "planned": dr.get("planned"), "no_op": dr.get("no_op"),
+             "universe": dr.get("universe")})
 
 
 def _opt_texture_checks(r):
@@ -598,7 +672,8 @@ def run_all(bus_dir, project_dir):
 
     _safe(r, "migrate.rename", lambda: _migrate_rename_roundtrip(r))
     _safe(r, "migrate.move", lambda: _migrate_move_roundtrip(r))
-    _safe(r, "migrate.copy", lambda: _migrate_copy_roundtrip(r))
+    _safe(r, "migrate.copy", lambda: _migrate_copy_roundtrip(r, project_dir))
+    _safe(r, "enumerate", lambda: _enumeration_checks(r))
     # v1.5 优化族（纹理流送池 / Nanite+半透明 / 合批方案）：真机 API 路径与双钥写回读
     opt_tex = _safe(r, "opt.texture", lambda: _opt_texture_checks(r)) or {}
     opt_nan = _safe(r, "opt.nanite", lambda: _opt_nanite_checks(r)) or {}
