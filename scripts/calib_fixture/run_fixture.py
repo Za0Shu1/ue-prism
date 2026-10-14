@@ -131,6 +131,8 @@ def main(argv=None):
     argv_checks = [SYS_PY, os.path.join(HERE, "checks.py"), bus_dir, proj_dir]
     matrix_out = a.matrix or os.path.join(tmp, "matrix.json")
     argv_checks += ["--out", matrix_out]
+    if a.hism_roundtrip:
+        argv_checks.append("--hism-roundtrip")
     rc = subprocess.call(argv_checks, env=env)
     if a.close_editor:
         subprocess.call(["powershell", "-NoProfile", "-Command",

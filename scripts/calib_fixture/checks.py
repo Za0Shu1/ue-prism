@@ -515,7 +515,7 @@ def _opt_hism_checks(r, roundtrip=False):
     """路线 A（真折叠成 HISM）真值校验：CalibMap 已知 1500 个散装引擎 Cube。
 
     常驻必查：plan 不动场景、写态双钥守卫、非法 mode 被拒。
-    可选（--hism-roundtrip）：真折叠 -> 校验 Actor 数下降 -> 按清单回滚 -> 校验数量回来。
+    可选（--hism-roundtrip）：真折叠 -> 校验 Actor 数下降且容器被认成实例化 -> 按清单回滚 -> 校验数量回来且网格真回到位置。
     回滚会重写关卡两次，只在显式要求时跑（其余校验只依赖数量，不依赖对象名）。
     """
     cube_mesh = "/Engine/BasicShapes/Cube"
@@ -551,27 +551,42 @@ def _opt_hism_checks(r, roundtrip=False):
     col, dt2 = _t(lambda: r.call("opt_collapse_hism", {
         "mode": "collapse", "min_count": 100, "limit": 1, "mesh": cube_mesh,
         "manifest": mf, "dry_run": False, "confirm": True}))
-    mid = int((r.call("analyze_instancing", {"min_count": 100, "cap": 5})
-               or {}).get("world_total_actors") or 0)
+    mid_scan = r.call("analyze_instancing", {"min_count": 100, "cap": 5}) or {}
+    mid = int(mid_scan.get("world_total_actors") or 0)
+    mid_inst = int((mid_scan.get("summary") or {}).get("excluded_instanced_actors") or 0)
     r.check("hism.collapse_reduces_actors",
             col.get("executed") is True and col.get("hism_created") == 1
             and int(col.get("actors_instanced") or 0) >= 1000
             and col.get("rollback_available") is True and os.path.exists(mf)
-            and mid < before_total,
+            and mid < before_total and mid_inst >= 1,
             {"hism_created": col.get("hism_created"),
              "instanced": col.get("actors_instanced"),
              "destroyed": col.get("actors_destroyed"), "actors_before": before_total,
-             "actors_after": mid, "elapsed_s": dt2, "note": col.get("note")})
+             "actors_after": mid, "instanced_actors": mid_inst,
+             "elapsed_s": dt2, "note": col.get("note")})
     res, dt3 = _t(lambda: r.call("opt_collapse_hism", {
         "mode": "restore", "manifest": mf, "dry_run": False, "confirm": True}))
-    back = int((r.call("analyze_instancing", {"min_count": 100, "cap": 5})
-                or {}).get("world_total_actors") or 0)
+    again = r.call("analyze_instancing", {"min_count": 100, "cap": 5}) or {}
+    back = int(again.get("world_total_actors") or 0)
+    again_summary = again.get("summary") or {}
+    again_cube = {g.get("mesh"): g for g in again.get("groups") or []}.get(cube_mesh) or {}
     r.check("hism.restore_round_trips",
             res.get("executed") is True and int(res.get("changed") or 0) >= 1000
-            and back >= before_total,
+            and int(res.get("actors_destroyed") or 0) == 1 and back >= before_total,
             {"recreated": res.get("changed"), "hism_destroyed": res.get("actors_destroyed"),
              "actors_now": back, "actors_expected_ge": before_total, "elapsed_s": dt3,
              "note": res.get("note")})
+    # 真机踩过的坑：回滚把网格往 AActor 上写（真机没这个接口），数量对了但 1500 个
+    # Actor 全是空壳。只数 Actor 数量的早检查看不见，必须再按场景真值复核一遍。
+    no_mesh = again_summary.get("excluded_no_mesh_actors")
+    r.check("hism.restore_puts_meshes_back",
+            res.get("success") is True and int(res.get("restore_mesh_missing") or 0) == 0
+            and int(again_cube.get("actors") or 0) >= 1000 and no_mesh == 0,
+            {"restore_mesh_missing": res.get("restore_mesh_missing"),
+             "cube_actors_after": again_cube.get("actors"),
+             "no_mesh_after": again_summary.get("excluded_no_mesh_actors"),
+             "failed": (res.get("failed") or [])[:3]})
+    out["roundtrip"] = {"before": before_total, "collapsed_to": mid, "back_to": back}
     out["roundtrip"] = {"before": before_total, "collapsed_to": mid, "back_to": back}
     return out
 

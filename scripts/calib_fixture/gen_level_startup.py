@@ -22,6 +22,9 @@ ELL = unreal.EditorLevelLibrary
 FOLDER = "/Game/PrismCalib"
 MAP = "CalibMap"
 SPAWN_N = int(os.environ.get("PRISM_FIXTURE_ACTORS", "1500"))
+# 幂等只看数量会把"回滚后网格丢光"的地图留下来：PRISM_FIXTURE_RESET_MAP=1
+# 先删掉关卡重建，让真值始终是"带网格的 1500 个散装 Cube"。
+RESET_MAP = os.environ.get("PRISM_FIXTURE_RESET_MAP", "") == "1"
 MESH = "/Engine/BasicShapes/Cube.Cube"
 
 
@@ -166,12 +169,49 @@ def _populate(out):
         out["saved"] = str(e)
 
 
+def _actor_mesh(actor):
+    """与领域侧 _mesh_probe 同口径的网格读取：拿到的才算数。
+
+    只调 get_static_mesh() 会把真机上带网格的地图自检成 0（5.4 这个方法不在脚本
+    绑定里），真值自检必须逐个签名兜底，否则报告本身就是错的。
+    """
+    comps = []
+    for getter in (lambda: actor.get_components_by_class(unreal.StaticMeshComponent),
+                   lambda: actor.get_component_by_class(unreal.StaticMeshComponent)):
+        try:
+            got = getter()
+        except Exception:
+            continue
+        if got is None:
+            continue
+        comps = list(got) if isinstance(got, (list, tuple)) else [got]
+        break
+    for comp in comps:
+        if comp is None:
+            continue
+        for getter in (lambda: comp.static_mesh,
+                       lambda: comp.get_editor_property("static_mesh"),
+                       lambda: comp.get_static_mesh()):
+            try:
+                mesh = getter()
+            except Exception:
+                continue
+            if mesh is not None:
+                return mesh
+    return None
+
+
 def run():
     out = {"actors_before": 0}
     make_cube(out)
     make_cube(out, "T_CalibHdr", hdr=True)
     dest = FOLDER + "/" + MAP
     les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+    if RESET_MAP and EAL.does_asset_exist(dest):
+        try:
+            out["deleted_map"] = bool(EAL.delete_asset(dest))
+        except Exception as exc:
+            out["deleted_map"] = str(exc)
     if not EAL.does_asset_exist(dest):
         opened = False
         try:  # 5.4 真机签名
@@ -193,7 +233,15 @@ def run():
         out["actors_before"] = len(actors)
         if len(actors) < 1000:
             _populate(out)
-    out["actors_after"] = len(ELL.get_all_level_actors() or [])
+    actors = ELL.get_all_level_actors() or []
+    out["actors_after"] = len(actors)
+    # 真值自检：数量够了但网格没押上 = 地图是空壳，后面的合批/HISM
+    # 校验会把 1500 个空壳当"散装 Cube"，那是假的消息
+    with_mesh = 0
+    for actor in actors:
+        if _actor_mesh(actor) is not None:
+            with_mesh += 1
+    out["actors_with_mesh"] = with_mesh
     return out
 
 
