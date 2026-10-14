@@ -67,6 +67,7 @@
 | `streaming.summary_counts_high_bpp` | high_bpp 与 uncompressed 分档 | summary.high_bpp_count>=1（收益比例 7/8 vs 3/4、动作不同，不能混一档）；model.version=v2-format-aware-runtime |
 | `streaming.pool_ini_read` | 夹具工程 Config 里有 ini | read_pool_config files_scanned>=1；compare.demand_mb 有值（读不到 PoolSize 时判 unknown，不猜默认） |
 | `streaming.clamp_dry_run_does_not_write` | dry_run=True | planned=1、changed=0、executed=False |
+| 计划窗口可读性（L0 `test_window_rows_put_actionable_first`） | 宽窗口里 change 与 no_op 混排 | `targets` 按 change 优先（收益降序）返回、`list_cap=0` 取全量、`list_cap`/`targets_truncated` 常驻（真实大工程踩点：61 张待钳被前 80 行 no_op 淹没，计划看起来像空的） |
 | `streaming.clamp_write_honest` | 双钥真写 MaxSize=2048 | changed=1 + api 命中签名 + saved!=False（写不进必须 failed） |
 | `streaming.clamp_readback_from_disk` | 写完再量 | get_asset_metrics 回读 max_size==2048（真值闭环） |
 | `streaming.clamp_restored_for_next_run` | 还原 | max_size=0 写回 changed=1（夹具自还原，可重复跑） |
