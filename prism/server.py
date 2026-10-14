@@ -644,7 +644,7 @@ def scan_texture_streaming(folder: Annotated[str, Field(description="Content 下
          "probe_source": _as_bool(probe_source, True)})
 
 
-def opt_texture_set_virtual(paths: Annotated[str | None, Field(description="要改的纹理（逗号/分号/换行分隔）；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围：Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, limit: Annotated[int, Field(description="本窗口最多处理多少张（按体量降序）")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划（每张 before→after + 预计省多少 MB），不写盘")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥（写操作契约）")] = False, probe_source: Annotated[bool, Field(description="false=跳过引擎源尺寸探针（默认 true=探）。批量写后紧贴着重扫请置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）")] = True, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+def opt_texture_set_virtual(paths: Annotated[str | None, Field(description="要改的纹理（逗号/分号/换行分隔）；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围：Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, limit: Annotated[int, Field(description="本窗口最多处理多少张（按体量降序）")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划（每张 before→after + 预计省多少 MB），不写盘")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥（写操作契约）")] = False, probe_source: Annotated[bool, Field(description="false=跳过引擎源尺寸探针（默认 true=探）。批量写后紧贴着重扫请置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）")] = True, list_cap: Annotated[int, Field(description="返回的 targets 行数上限（默认 80；0=不截断）。计划行按 change 优先排序，宽窗口核对候选时置 0 可拿全量")] = 80, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """批量开虚拟纹理（写·双钥；TODO Feature 1b）。Needs live bridge.
 
     Cube/Volume 不支持 VT -> skipped；已虚拟 -> no_op；属性写不进 -> failed + tried。
@@ -662,10 +662,11 @@ def opt_texture_set_virtual(paths: Annotated[str | None, Field(description="要�
         "opt_texture_set_virtual",
         {"paths": paths, "folder": folder, "map": map, "limit": int(limit),
          "dry_run": dry_run, "confirm": confirm,
-         "probe_source": _as_bool(probe_source, True)})
+         "probe_source": _as_bool(probe_source, True),
+         "list_cap": int(list_cap)})
 
 
-def opt_texture_clamp_max_size(paths: Annotated[str | None, Field(description="要改的纹理；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围：Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, max_size: Annotated[int, Field(description="钳到的分辨率（0=取消限制，属放大动作，会显著提示）")] = 2048, only_if_larger: Annotated[bool, Field(description="默认 true=只对大于 max_size 的生效")] = True, limit: Annotated[int, Field(description="本窗口最多处理多少张")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, probe_source: Annotated[bool, Field(description="false=跳过引擎源尺寸探针（默认 true=探）。批量写后紧贴着重扫请置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）")] = True, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+def opt_texture_clamp_max_size(paths: Annotated[str | None, Field(description="要改的纹理；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围：Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, max_size: Annotated[int, Field(description="钳到的分辨率（0=取消限制，属放大动作，会显著提示）")] = 2048, only_if_larger: Annotated[bool, Field(description="默认 true=只对大于 max_size 的生效")] = True, limit: Annotated[int, Field(description="本窗口最多处理多少张")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, probe_source: Annotated[bool, Field(description="false=跳过引擎源尺寸探针（默认 true=探）。批量写后紧贴着重扫请置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）")] = True, list_cap: Annotated[int, Field(description="返回的 targets 行数上限（默认 80；0=不截断）。计划行按 change 优先排序，宽窗口核对候选时置 0 可拿全量")] = 80, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """批量钳 MaxTextureSize（写·双钥；TODO Feature 1b）。Needs live bridge.
 
     降流送池压力最便宜的一刀：只改属性，不动源图。dry-run 给每张 before→after
@@ -684,10 +685,11 @@ def opt_texture_clamp_max_size(paths: Annotated[str | None, Field(description="�
         {"paths": paths, "folder": folder, "map": map, "max_size": int(max_size),
          "only_if_larger": only_if_larger, "limit": int(limit),
          "dry_run": dry_run, "confirm": confirm,
-         "probe_source": _as_bool(probe_source, True)})
+         "probe_source": _as_bool(probe_source, True),
+         "list_cap": int(list_cap)})
 
 
-def opt_texture_set_compression(paths: Annotated[str | None, Field(description="要改的纹理；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, compression: Annotated[str, Field(description="目标格式友好名：default/normal/masks/editoricon（大小写与下划线不敏感）")] = "default", only_uncompressed: Annotated[bool, Field(description="默认 true=只动非工程运行时格式（真未压缩系 / EditorIcon 这类禁流送系）；格式文本判不准也不动")] = True, limit: Annotated[int, Field(description="本窗口最多处理多少张")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, probe_source: Annotated[bool, Field(description="false=跳过引擎源尺寸探针（默认 true=探）。批量写后紧贴着重扫请置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）")] = True, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+def opt_texture_set_compression(paths: Annotated[str | None, Field(description="要改的纹理；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, compression: Annotated[str, Field(description="目标格式友好名：default/normal/masks/editoricon（大小写与下划线不敏感）")] = "default", only_uncompressed: Annotated[bool, Field(description="默认 true=只动非工程运行时格式（真未压缩系 / EditorIcon 这类禁流送系）；格式文本判不准也不动")] = True, limit: Annotated[int, Field(description="本窗口最多处理多少张")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, probe_source: Annotated[bool, Field(description="false=跳过引擎源尺寸探针（默认 true=探）。批量写后紧贴着重扫请置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）")] = True, list_cap: Annotated[int, Field(description="返回的 targets 行数上限（默认 80；0=不截断）。计划行按 change 优先排序，宽窗口核对候选时置 0 可拿全量")] = 80, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """批量改压缩格式（写·双钥；TODO Feature 1b 可选项）。Needs live bridge.
 
     两类非工程运行时格式，收益口径不同（结果里分行给 savings_mb）：
@@ -710,7 +712,8 @@ def opt_texture_set_compression(paths: Annotated[str | None, Field(description="
         {"paths": paths, "folder": folder, "map": map, "compression": str(compression),
          "only_uncompressed": only_uncompressed, "limit": int(limit),
          "dry_run": dry_run, "confirm": confirm,
-         "probe_source": _as_bool(probe_source, True)})
+         "probe_source": _as_bool(probe_source, True),
+         "list_cap": int(list_cap)})
 
 
 def scan_nanite_candidates(folder: Annotated[str, Field(description="Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包取网格")] = None, paths: Annotated[str | None, Field(description="只查这些网格")] = None, min_triangles: Annotated[int, Field(description="低于此 LOD0 三角数算 low_complexity（默认 20 万，同 rules.mesh_tri warn）")] = 200000, max_assets: Annotated[int, Field(description="本窗口最多度量多少个网格")] = 200, top: Annotated[int, Field(description="items 返回条数上限")] = 40, offset: Annotated[int, Field(description="分页偏移")] = 0, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):

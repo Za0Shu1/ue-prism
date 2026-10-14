@@ -516,7 +516,9 @@ def drive(op, terms, paths, folder, map_path, limit, offset, dry_run, confirm,
             "planned": 0, "est_savings_mb": 0.0, "est_permanent_release_mb": 0.0,
             "universe": resolved["universe"],
             "total": 0, "truncated": resolved["truncated"], "cap": resolved["cap"],
-            "note": resolved["note"], "rejected": resolved["rejected"], "tried": []}
+            "note": resolved["note"], "rejected": resolved["rejected"],
+            "list_cap": _int_cap(list_cap), "targets_truncated": False,
+            "tried": []}
     if model:
         base["model"] = model
     if extra:
@@ -583,8 +585,13 @@ def drive(op, terms, paths, folder, map_path, limit, offset, dry_run, confirm,
         rows.append(row)
 
     base["executed"] = not dry
-    base["targets"] = rows[:list_cap]
-    base["targets_truncated"] = len(rows) > list_cap
+    # 返回窗口必须先看得到"要动的"：真机踩点——200 张窗口里 61 张待钳，
+    # 但按体量降序的前 80 行几乎全是已达标(no_op)，计划看起来像空的。
+    cap = _int_cap(list_cap)
+    ordered = sorted(rows, key=_row_order)
+    base["targets"] = ordered[:cap] if cap else ordered
+    base["targets_truncated"] = cap > 0 and len(ordered) > cap
+    base["list_cap"] = cap
     base["total"] = len(rows)
     base["est_savings_mb"] = round(base["est_savings_mb"], 3)
     base["est_permanent_release_mb"] = round(base["est_permanent_release_mb"], 3)
@@ -608,6 +615,26 @@ def drive(op, terms, paths, folder, map_path, limit, offset, dry_run, confirm,
                         % (base["changed"], saved_count, base["no_op"],
                            len(base["skipped"]), len(base["failed"])))
     return envelope.make_ok(base)
+
+
+def _int_cap(value):
+    """list_cap 归一：<=0（或非法）= 不截断，返回 0。"""
+    try:
+        cap = int(value)
+    except (TypeError, ValueError):
+        return 80
+    return cap if cap > 0 else 0
+
+
+def _row_order(row):
+    """排序键：change 在前（按 savings_mb 降序），其余保持判定顺序的相对稳定。"""
+    kind = str(row.get("kind") or "")
+    rank = 0 if kind == "change" else (1 if kind in ("skip", "failed", "unknown") else 2)
+    try:
+        saving = -float(row.get("savings_mb") or 0)
+    except (TypeError, ValueError):
+        saving = 0.0
+    return (rank, saving)
 
 
 def decision_write_note(op):

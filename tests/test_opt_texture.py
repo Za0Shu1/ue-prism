@@ -64,6 +64,31 @@ def test_string_bools_from_bus_are_normalized_not_truthy():
     assert env2["result"]["executed"] is False and env2["result"]["note"] == "no_engine"
 
 
+def test_window_rows_put_actionable_first():
+    """计划窗口排序纯逻辑：change 在前（收益降序），no_op 垫底。
+
+    真机踩点：200 张窗口有 61 张待钳，但按体量降序返回的前 80 行几乎全是
+    no_op，看起来像"没东西可做"——返回窗口必须先看得到要动的。
+    """
+    from prism.domain import optutil as ou
+    rows = [{"kind": "no_op", "package": "/Game/A"},
+            {"kind": "change", "savings_mb": 3.0, "package": "/Game/B"},
+            {"kind": "failed", "package": "/Game/C"},
+            {"kind": "change", "savings_mb": 40.0, "package": "/Game/D"}]
+    ordered = sorted(rows, key=ou._row_order)
+    assert [r["package"] for r in ordered] == ["/Game/D", "/Game/B", "/Game/C", "/Game/A"]
+    assert ou._int_cap(0) == 0 and ou._int_cap("abc") == 80 and ou._int_cap(-5) == 0
+
+
+def test_list_cap_is_reported_and_zero_means_untruncated():
+    assert ot.opt_texture_clamp_max_size(paths="/Game/T/X")["result"]["list_cap"] == 80
+    res = ot.opt_texture_clamp_max_size(paths="/Game/T/X", list_cap=0)["result"]
+    assert res["list_cap"] == 0 and res["targets_truncated"] in (False, None)
+    for fn, kw in ((ot.opt_texture_set_virtual, {}),
+                   (ot.opt_texture_set_compression, {"compression": "default"})):
+        assert fn(paths="/Game/T/X", list_cap=120, **kw)["result"]["list_cap"] == 120
+
+
 def test_clamp_rejects_negative_max_size():
     env = ot.opt_texture_clamp_max_size(paths="/Game/T/X", max_size=-1)
     assert env["ok"] is False and env["error"]["code"] == envelope.Code.RUNTIME_ERROR
