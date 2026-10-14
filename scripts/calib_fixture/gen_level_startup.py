@@ -33,13 +33,58 @@ def _tmp_dir():
     return d
 
 
-def make_cube(out):
-    """TextureCube 靶：引擎自带立方图复制一份（GUI 下可行；commandlet 会崩）。"""
-    dest = FOLDER + "/T_CalibCube"
+def _set_compression(tex, member, out, key):
+    """把压缩设置写成指定枚举成员并回读（跨版本成员名漂移多候选）。
+
+    写失败必须记进 out 让 checks 当场响：靶的压缩格式没造上，
+    下游所有格式判定都会变成"看着对其实空转"。
+    """
+    enum = getattr(unreal, "TextureCompressionSettings", None)
+    errs = []
+    for name in (member, member.replace("TC_", "")):
+        value = getattr(enum, name, None) if enum is not None else None
+        if value is None:
+            errs.append(name + ":no_member")
+            continue
+        try:
+            tex.set_editor_property("compression_settings", value)
+        except Exception as exc:
+            errs.append(name + ":" + type(exc).__name__)
+            continue
+        got = str(tex.get_editor_property("compression_settings"))
+        out[key] = {"set": name, "readback": got, "errs": errs}
+        return member in got or got.endswith(member)
+    out[key] = {"set": None, "errs": errs}
+    return False
+
+
+def make_cube(out, name="T_CalibCube", hdr=False):
+    """TextureCube 靶：引擎自带立方图复制一份（GUI 下可行；commandlet 会崩）。
+
+    hdr=True 再叠 TC_HDR，作为"高位深不降块压缩"的真值靶：5.4 真机定案
+    （/Game/ClientLib/Material/Textures/T_HDR 常驻 201326592 = 6x2048^2x8B），
+    旧口径把 TC_HDR 归"压缩格式"按 1B/px 估 -> 池账低估 6 倍且从不报账。
+    幂等：资产已存在也要确认压缩格式真的是 TC_HDR（上一轮可能没写上）。
+    """
+    key = "hdr_cube" if hdr else "cube"
+    dest = FOLDER + "/" + name
     disk = os.path.join(str(unreal.SystemLibrary.get_project_directory()),
-                        "Content", "PrismCalib", "T_CalibCube.uasset")
+                        "Content", "PrismCalib", name + ".uasset")
     if os.path.isfile(disk) and EAL.does_asset_exist(dest):
-        out["cube"] = "exists"
+        if not hdr:
+            out[key] = "exists"
+            return
+        exist_tex = unreal.load_asset(dest)
+        if exist_tex is not None and _set_compression(exist_tex, "TC_HDR", out,
+                                                      "hdr_cube_compress"):
+            try:
+                EAL.save_asset(dest, only_if_dirty=False)
+            except Exception:
+                try:
+                    EAL.save_asset(dest)
+                except Exception:
+                    pass
+        out[key] = "exists"
         return
     ar = unreal.AssetRegistryHelpers.get_asset_registry()
     try:
@@ -68,6 +113,10 @@ def make_cube(out):
         except Exception as e:
             out["cube_create_err"] = str(e)
     if made:
+        if hdr:
+            tex = unreal.load_asset(dest)
+            if tex is not None:
+                _set_compression(tex, "TC_HDR", out, "hdr_cube_compress")
         try:
             EAL.save_asset(dest, only_if_dirty=False)
         except Exception:
@@ -75,7 +124,7 @@ def make_cube(out):
                 EAL.save_asset(dest)
             except Exception:
                 pass
-    out["cube"] = {"made": made, "disk": os.path.isfile(disk)}
+    out[key] = {"made": made, "disk": os.path.isfile(disk)}
 
 
 def _world_name():
@@ -120,6 +169,7 @@ def _populate(out):
 def run():
     out = {"actors_before": 0}
     make_cube(out)
+    make_cube(out, "T_CalibHdr", hdr=True)
     dest = FOLDER + "/" + MAP
     les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
     if not EAL.does_asset_exist(dest):

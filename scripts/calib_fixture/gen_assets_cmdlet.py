@@ -7,6 +7,7 @@ PNG 目录取环境变量 PRISM_FIXTURE_TMP/pngs，缺省 <工程>/Saved/PrismFi
 """
 import json
 import os
+import shutil
 import traceback
 
 import unreal
@@ -58,6 +59,19 @@ def main():
     tmp = _tmp_dir()
     pngs = os.path.join(tmp, "pngs")
     out = {"folder": FOLDER, "steps": [], "errors": []}
+    # 夹具必须可重复跑：上一轮 migrate_asset 的复制靶留在 _pwtmp（5.4 真机实测：残留
+    # 让下一轮 dry-run 报 collision 并拒绝写入，进而拖垮整张兼容矩阵），每轮开头清干净。
+    tmp_pkg = FOLDER + "/_pwtmp"
+    try:
+        if EAL.does_directory_exist(tmp_pkg):
+            out["steps"].append("delete_directory=%s" % EAL.delete_directory(tmp_pkg))
+    except Exception as exc:
+        out["errors"].append("delete_directory: %r" % (exc,))
+    disk_tmp = os.path.join(str(unreal.SystemLibrary.get_project_content_directory()),
+                            "PrismCalib", "_pwtmp")
+    if os.path.isdir(disk_tmp):
+        shutil.rmtree(disk_tmp, ignore_errors=True)
+        out["steps"].append("rmtree=%s" % disk_tmp.replace("\\", "/"))
 
     def step(name, fn):
         try:
@@ -193,6 +207,277 @@ def main():
                 "expect": "M_CalibStub -> redirector-backed broken dep /Game/PrismCalib/T_CalibStub"}
 
     step("calib_stub", calib_stub)
+
+
+    def calib_unclamped():
+        """流送池真值靶(不钳大图)：T_BigNoise 显式 max_texture_size=0(不限)。
+        已知真值：source_width=4096 且无 MaxSize -> scan_texture_streaming 必给
+        clamp_to=2048；与之对照 T_FakeBig(钳到 128)不得出现在 need_clamp。"""
+        pkg = FOLDER + "/T_BigNoise"
+        tex = unreal.load_asset(pkg)
+        if tex is None:
+            raise RuntimeError("load T_BigNoise failed")
+        tex.set_editor_property("max_texture_size", 0)
+        EAL.save_asset(pkg)
+        return "T_BigNoise max_texture_size=0 (unclamped 4K clamp target)"
+
+    step("calib_unclamped", calib_unclamped)
+
+    def calib_icon():
+        """禁流送格式真值靶：T_CalibIcon = T_Used1K 副本 + TC_EDITORICON。
+        已知真值：format_class='no_stream' -> pool_mb=0 且 permanent_mb>0（整张恒常驻），
+        且不得被当成 4B/px 未压缩虚报 3/4 收益。"""
+        if not _ensure_texture("T_CalibIcon", png=os.path.join(pngs, "T_Used1K.png")):
+            raise RuntimeError("make T_CalibIcon failed")
+        tex = unreal.load_asset(FOLDER + "/T_CalibIcon")
+        if tex is None:
+            raise RuntimeError("load T_CalibIcon failed")
+        hit = None
+        errs = []
+        enum = getattr(unreal, "TextureCompressionSettings", None)
+        for member in ("TC_EDITORICON", "TC_EDITOR_ICON", "EDITORICON"):
+            value = getattr(enum, member, None) if enum is not None else None
+            if value is None:
+                errs.append(member + ":no_member")
+                continue
+            try:
+                tex.set_editor_property("compression_settings", value)
+            except Exception as exc:
+                errs.append(member + ":" + type(exc).__name__)
+                continue
+            hit = member
+            break
+        if hit is None:
+            raise RuntimeError("compression_settings write failed: %s" % (errs,))
+        got = tex.get_editor_property("compression_settings")
+        EAL.save_asset(FOLDER + "/T_CalibIcon")
+        return {"set": hit, "readback": str(got), "errs": errs}
+
+    step("calib_icon", calib_icon)
+
+    def calib_translucent_material():
+        """半透明材质 M_CalibTranslucent（Nanite 冲突真值的材质侧）。"""
+        pkg = FOLDER + "/M_CalibTranslucent"
+        if EAL.does_asset_exist(pkg):
+            EAL.delete_asset(pkg)
+        at = unreal.AssetToolsHelpers.get_asset_tools()
+        mat = at.create_asset("M_CalibTranslucent", FOLDER, unreal.Material,
+                              unreal.MaterialFactoryNew())
+        if mat is None:
+            raise RuntimeError("create M_CalibTranslucent failed")
+        hit = None
+        errs = []
+        bm = getattr(unreal, "BlendMode", None)
+        for member in ("BLEND_TRANSLUCENT", "BLEND_Translucent", "TRANSLUCENT"):
+            value = getattr(bm, member, None) if bm is not None else None
+            if value is None:
+                errs.append(member + ":no_member")
+                continue
+            try:
+                mat.set_editor_property("blend_mode", value)
+            except Exception as exc:
+                errs.append(member + ":" + type(exc).__name__)
+                continue
+            hit = member
+            break
+        if hit is None:
+            raise RuntimeError("blend_mode write failed: %s" % (errs,))
+        got = mat.get_editor_property("blend_mode")
+        EAL.save_asset(pkg)
+        return {"set": hit, "readback": str(got), "errs": errs}
+
+    step("calib_translucent_material", calib_translucent_material)
+
+    def _slot_materials(mesh):
+        """当前槽位材质（回读口径）。5.4 实证 static_materials[i].material_interface，
+        该属性取不到时退到 get_material(section_index)。"""
+        out = []
+        try:
+            for slot in (mesh.get_editor_property("static_materials") or []):
+                try:
+                    got = slot.get_editor_property("material_interface")
+                except Exception:
+                    got = None
+                if got is not None:
+                    out.append(got)
+        except Exception:
+            pass
+        if out:
+            return out
+        try:
+            for i in range(int(mesh.get_num_sections(0) or 0)):
+                got = mesh.get_material(i)
+                if got is not None:
+                    out.append(got)
+        except Exception:
+            pass
+        return out
+
+    def _assign_material(mesh, mat):
+        """把网格槽位材质换成半透明材质。多候选(跨版本签名漂移) + 回读证据。"""
+        # 5.4 headless 实测：get_lod_used_materials/get_used_materials 不存在、槽位元素
+        # 字段是 material_interface（写 .material 抛异常）、另有直写访问器
+        # set_material(index, material)。旧实现三条候选全落空却静默返回，靶材质仍是引擎
+        # 不透明材质，nanite.* 5 项校验整组红——造靶失败必须当场响，不留给下游猜。
+        tried = []
+        want = str(mat.get_path_name()).split(".")[0]
+
+        def back():
+            return [str(m.get_path_name()).split(".")[0] for m in _slot_materials(mesh)]
+
+        before = back()
+        lib = getattr(unreal, "StaticMeshEditorLibrary", None)
+        if lib is not None:
+            for old in _slot_materials(mesh):
+                if str(old.get_path_name()).split(".")[0] == want:
+                    continue
+                try:
+                    lib.replace_material(mesh, old, mat)
+                    tried.append({"sig": "StaticMeshEditorLibrary.replace_material(old->new)"})
+                except Exception as exc:
+                    tried.append({"sig": "StaticMeshEditorLibrary.replace_material",
+                                  "err": type(exc).__name__})
+                    break
+                if want in back():
+                    return {"readback_materials": back(), "hit": True,
+                            "tried": tried, "before": before}
+        try:
+            sections = int(mesh.get_num_sections(0) or 0)
+        except Exception as exc:
+            sections = 0
+            tried.append({"sig": "get_num_sections(0)", "err": type(exc).__name__})
+        if sections and hasattr(mesh, "set_material"):
+            done = True
+            for i in range(sections):
+                try:
+                    mesh.set_material(i, mat)
+                except Exception as exc:
+                    done = False
+                    tried.append({"sig": "set_material(%d)" % i,
+                                  "err": type(exc).__name__})
+                    break
+            if done:
+                tried.append({"sig": "set_material(i, mat)", "sections": sections})
+            if want in back():
+                return {"readback_materials": back(), "hit": True,
+                        "tried": tried, "before": before}
+        try:
+            slots = list(mesh.get_editor_property("static_materials") or [])
+            for slot in slots:
+                for key in ("material_interface", "material"):
+                    try:
+                        slot.set_editor_property(key, mat)
+                        break
+                    except Exception:
+                        continue
+            if slots:
+                mesh.set_editor_property("static_materials", slots)
+                tried.append({"sig": "static_materials[i].material_interface",
+                              "slots": len(slots)})
+        except Exception as exc:
+            tried.append({"sig": "static_materials[i].material_interface",
+                          "err": type(exc).__name__})
+        used = []
+        try:
+            used = list(mesh.get_lod_used_materials(0) or [])
+        except Exception as exc:
+            tried.append({"sig": "get_lod_used_materials(0)", "err": type(exc).__name__})
+        got = back()
+        return {"readback_materials": got, "hit": want in got, "tried": tried,
+                "before": before,
+                "lod_used": [str(m.get_path_name()).split(".")[0] for m in used]}
+
+    def calib_nanite_target():
+        """Nanite+半透明冲突真值靶：CalibMeshTranslucent = 引擎 Cube 副本 + 半透明材质。
+        故意不开 Nanite：检查脚本先用 opt_mesh_set_nanite(skip_translucent=False) 强行开
+        (验拦截与真写)，再用 fix_nanite_translucent 关回(自还原成 blocked_translucent)。"""
+        pkg = FOLDER + "/CalibMeshTranslucent"
+        if EAL.does_asset_exist(pkg):
+            EAL.delete_asset(pkg)
+        if EAL.duplicate_asset("/Engine/BasicShapes/Cube", pkg) is None:
+            raise RuntimeError("duplicate engine cube failed")
+        mesh = unreal.load_asset(pkg)
+        if mesh is None:
+            raise RuntimeError("load CalibMeshTranslucent failed")
+        mat = unreal.load_asset(FOLDER + "/M_CalibTranslucent")
+        if mat is None:
+            raise RuntimeError("load M_CalibTranslucent failed (dependency)")
+        info = _assign_material(mesh, mat)
+        EAL.save_asset(pkg)
+        if not info.get("hit"):
+            raise RuntimeError("半透明靶没造上：CalibMeshTranslucent 材质替换失败 %s"
+                               % (info.get("tried"),))
+        return info
+
+    step("calib_nanite_target", calib_nanite_target)
+
+    def calib_material_instance():
+        """材质实例真值靶：M_CalibInst(MaterialInstanceConstant，父=M_CalibRef) 挂上
+        CalibMeshInstance。5.4 探针实证：MIC 直读 used_with_nanite 必抛异常，
+        该开关只在父 UMaterial 上（get_base_material() 才够得着）——真实工程某网格
+        5/5 材质因此恒 null。已知真值 = scan 必须给出非 null，且 usage_api 经基类材质。
+        """
+        mic_pkg = FOLDER + "/M_CalibInst"
+        mesh_pkg = FOLDER + "/CalibMeshInstance"
+        for nm in (mic_pkg, mesh_pkg):
+            if EAL.does_asset_exist(nm):
+                EAL.delete_asset(nm)
+        base = unreal.load_asset(FOLDER + "/M_CalibRef")
+        if base is None:
+            raise RuntimeError("load M_CalibRef failed (instance target parent)")
+        at = unreal.AssetToolsHelpers.get_asset_tools()
+        errs = []
+        mic = None
+        for fac in ("MaterialInstanceConstantFactoryNew", "ObjectFactoryNew"):
+            maker = getattr(unreal, fac, None)
+            if maker is None:
+                errs.append(fac + ":no_class")
+                continue
+            try:
+                mic = at.create_asset("M_CalibInst", FOLDER,
+                                      unreal.MaterialInstanceConstant, maker())
+            except Exception as exc:
+                errs.append(fac + ":" + type(exc).__name__)
+                continue
+            if mic is not None:
+                errs.append(fac + ":hit")
+                break
+        if mic is None:
+            # 兜底：复制引擎自带 MIC（同为 MaterialInstanceConstant，不透明）
+            try:
+                mic = EAL.duplicate_asset(
+                    "/Engine/EngineMaterials/Widget3DPassThrough_Opaque", mic_pkg)
+                errs.append("duplicate_engine_mic")
+            except Exception as exc:
+                errs.append("duplicate:" + type(exc).__name__)
+        if mic is None:
+            raise RuntimeError("create MaterialInstanceConstant failed: %s" % (errs,))
+        set_log = []
+        for key in ("parent", "base_material"):
+            try:
+                mic.set_editor_property(key, base)
+                set_log.append(key + ":ok")
+                break
+            except Exception as exc:
+                set_log.append(key + ":" + type(exc).__name__)
+        try:
+            parent_back = str(mic.get_editor_property("parent"))
+        except Exception as exc:
+            parent_back = "ERR:" + type(exc).__name__
+        EAL.save_asset(mic_pkg)
+        if EAL.duplicate_asset("/Engine/BasicShapes/Cube", mesh_pkg) is None:
+            raise RuntimeError("duplicate engine cube failed (instance mesh)")
+        mesh = unreal.load_asset(mesh_pkg)
+        if mesh is None:
+            raise RuntimeError("load CalibMeshInstance failed")
+        info = _assign_material(mesh, unreal.load_asset(mic_pkg) or mic)
+        EAL.save_asset(mesh_pkg)
+        if not info.get("hit"):
+            raise RuntimeError("材质实例没挂上 CalibMeshInstance: %s" % (info.get("tried"),))
+        return {"mic": mic_pkg, "create": errs, "parent_set": set_log,
+                "parent_readback": parent_back, "slots": info.get("readback_materials")}
+
+    step("calib_material_instance", calib_material_instance)
 
     out["assets"] = sorted(str(d.package_name) for d in
                            (unreal.AssetRegistryHelpers.get_asset_registry()
