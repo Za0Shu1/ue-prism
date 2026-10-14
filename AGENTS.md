@@ -6,11 +6,12 @@
 - `prism/server.py`（协议层）：可 import `mcp`；**绝不 import `unreal`**。把 MCP 调用转成总线请求。
 - `prism/bridge.py`（传输层）：文件总线适配器，只把调用分发到 `domain.FUNCTIONS` 白名单；换引擎/换传输只动这层。
 - `prism/domain/*.py`（领域层）：只用 `unreal` + 标准库；**绝不 import mcp/网络/server**；函数须 `@register` 进 `FUNCTIONS`。可整体搬进无头 commandlet。
+- `prism/streaming.py` 是纯 stdlib 的**共享口径**（纹理流送池数学 + ini 解析）：domain 与 `rules.py` 都从它取数。`rules.py` 不得 import `prism.domain.*`，需要同源就把数学放这类中立模块。
 
 依赖方向单向：`server -> (bus 文件协议) -> bridge -> domain`。`server` 与 `domain` 之间**不得**直接互相 import，只经总线信封通信。
 
 ## 关键约束
-- **默认只读**。写操作命名 `migrate_`/`fix_`，且默认 `dry_run` + 显式确认（`dry_run=False` 且 `confirm=True` 双钥才落盘）。
+- **默认只读**。写操作命名 `migrate_`（搬移）/`opt_`（纯优化写入，如降尺寸/开 VT/改压缩/开 Nanite）/`fix_`（纠错，如关冲突 Nanite、修坏引用），都默认 `dry_run` + 显式确认（`dry_run=False` 且 `confirm=True` 双钥才落盘）。
 - 读函数命名前缀：`get_` / `list_` / `scan_` / `describe_` / `read_`。
 - 所有返回一律走 `envelope.make_ok` / `envelope.make_err`；**错误绝不伪装成 ok**。列表结果携带 `total / truncated / cap`。
 - 领域函数异常在 `bridge.handler` 兜底成结构化错误，不裸崩。
@@ -28,9 +29,9 @@
 
 ## 测试（规范全文见 docs/TESTING.md）
 四层体系，按需执行：
-- **L0 离线**：`python -m pytest`（21 个文件 / 178 用例：总线、信封、domain 分发、规则纯逻辑、降级结构契约）。改动上述任何一层后必须跑。
+- **L0 离线**：`python -m pytest`（29 个文件 / 345 用例：总线、信封、domain 分发、规则纯逻辑、池估算模型、双钥写契约、降级结构契约）。改动上述任何一层后必须跑。
 - **L1 桥冒烟**：编辑器在线时 `python scripts/verify_connection.py` 或 `scripts/bus_call.py <bus_dir> ping`。
-- **L2 校准夹具**：`python scripts/calib_fixture/run_fixture.py --project <工程> --editor <UnrealEditor.exe>` 一键在任意 UE5 工程/版本重建已知真值（真大/假大/Cube/孤儿/合批靶）并跑 11 项真值校验，落 `matrix.json`（ue_version / API tried 命中 / 计时）——跨版本各跑一次即得兼容矩阵。
+- **L2 校准夹具**：`python scripts/calib_fixture/run_fixture.py --project <工程> --editor <UnrealEditor.exe>` 一键在任意 UE5 工程/版本重建已知真值（真大/假大/Cube/孤儿/合批/禁流送格式/Nanite+半透明/HDR 高位深/材质实例/压缩同名 no_op 靶）并跑 50 项真值校验，落 `matrix.json`（ue_version / API tried 命中 / 计时）——跨版本各跑一次即得兼容矩阵。
 - **L3 真实工程抽检**：大工程（用户提供）验证假阳性率、大闭包耗时、阈值手感。
 - 不要为了让测试通过而删除 domain 里的 `unreal` 分支——无引擎时靠惰性 import 降级返回。
 - domain 内 sleep/轮询等待编辑器状态**无效**（总线在主线程 tick 内同步处理）；冷热态敏感的度量要固化字段语义（如 `source_width`/`effective_width`），不随编辑器状态漂移。

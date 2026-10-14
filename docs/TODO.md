@@ -1,0 +1,146 @@
+# TODO — 纹理/Nanite/合批 三类优化功能（计划中，未实施）
+
+> 记录于 2026-10-08；2026-10-09 实现 PR-1/2/3 + PR-4 只读部分；2026-10-10 在一个新导入大批
+> 美术资源的 UE 5.4.4 测试工程上完成 **L2 50/50 全 PASS + L3 真实工程抽检**，修掉真机暴露的
+> 4 个缺陷（HDR 高位深台账、材质实例 Nanite 标志、日志归因噪音、压缩同名误判为待改），
+> 另记 1 个未修口径（冷态 Cube 源边长反推，见下「真机复盘」）。
+> 剩余：PR-4 路线 A（真折叠 HISM，见 D2）、5.3 矩阵补跑 v1.5 新增 28 项。
+> 触发来源：对 UE 5.3 工程 ProjectA 的实测分析（详见会话），暴露三类可产品化的优化点。
+
+## 背景（ProjectA 实测坐实的痛点）
+- `/Game` 约 20.6 GB；打包后 texture streaming 池超限，被迫把 `r.Streaming.PoolSize` 调到很高。根因：超大/未压缩大图（8K/16K/32K、`TC_EDITOR_ICON`）把整条 MiP 塞进池。
+- 引擎日志 ~14,846 条 Warning，几乎全是「半透明材质挂 Nanite 网格」（`Car011`、`zhujie_SM_zhujie_*`）——Nanite 不支持 Translucent，静默降级 + 刷屏。
+- 关卡 `Main_City`：2096 Actor，2003 散装 StaticMeshActor，实例化占比 0%；≥5 重复同网格 49 组（`SM_C1_B_Mix212`×171…）——合批机会巨大。
+- 已知坑：`TextureCube`/`VolumeTexture` **不支持**流式虚拟纹理（编辑器里勾选框置灰）；`TC_EDITOR_ICON` 等非压缩格式使 VT/池收益打折。
+
+## 开放决策（已按下列口径实现；要改判直接说）
+- [x] **D1 命名**：新增 `opt_` 族（纯优化写入：降尺寸/开 VT/改压缩/开 Nanite），`fix_` 保留给
+  纠错（`fix_nanite_translucent`/`fix_broken_references`），`migrate_` 给搬移。`AGENTS.md`
+  「写操作命名」已补一行。
+- [x] **D2 HISM 合批**：走**路线 B**——`analyze_instancing` 只读，`export=True` 仅把方案 JSON
+  原子写到 `<bus>/plans/`，绝不碰关卡 Actor。**路线 A（真折叠成 HISM）未实现**：UE 对关卡
+  Actor 级改动没有事务回滚，需单独拍板安全网（VCS 前置检查？另存关卡副本？）后再开写 PR。
+- [x] **D3 节奏**：照原计划 PR-1 只读 → PR-2 纹理写 → PR-3 Nanite 写 → PR-4 只读部分。
+
+## 实现落点（2026-10-09）
+- 共享口径：新增 `prism/streaming.py`（纯 stdlib：池估算数学 + `Config/**/*.ini` 解析），
+  domain 与 `rules.py` 同源取数，免得「工具报 8GB、报告报 6GB」两套账。`rules.py` 不得
+  import `prism.domain.*`，需要同源就把数学放这种中立模块。
+- domain 新增 `optutil.py`（通用双钥写骨架 `drive`：守卫→解析目标→inspect→dry/execute→
+  save→诚实计数）、`opt_texture.py`、`opt_nanite.py`、`opt_instancing.py`；已登记
+  `pluginpack.ENGINE_MODULES`（引擎侧闭包）。
+- 收益分两本账：`est_savings_mb`（池/显存）与 `est_permanent_release_mb`（释放恒常驻）不合并。
+  `TC_EDITOR_ICON` 系是「无 mip+禁流送→整张恒常驻池外」，不是「4B/px 未压缩」——开 VT 对它
+  无从谈起，钳尺寸仍有效；改回 `TC_Default` 的收益是变可流送，别按省 3/4 池报价。
+- server 新增 8 个工具（`scan_texture_streaming`、`opt_texture_set_virtual`、
+  `opt_texture_clamp_max_size`、`opt_texture_set_compression`、`scan_nanite_candidates`、
+  `opt_mesh_set_nanite`、`fix_nanite_translucent`、`analyze_instancing`），共 29 个。
+- 规则 `get_perf_report` 7→12 条：+`texture_streaming_overflow`（含 ini 池对照）、
+  `oversized_mip`、`uncompressed_texture`、`nanite_translucent_conflict`（离线直读编辑器日志）、
+  `drawcall_batching`；三档 PROFILES 各配阈值（mobile 更敏感）。
+- 测试：L0 29 文件 / 345 用例全绿；L2 夹具 +28 项真值校验（钳尺寸写往返、VT 拦 Cube、
+  EditorIcon 归类、Nanite 冲突全链路自还原、合批 plan_only、HDR 高位深台账、材质实例基类解包、
+  压缩同名 no_op）。
+- ✅ **真机 L2 已跑**（2026-10-10，UE 5.4.4-35576357）：`run_fixture` **50/50 PASS**、commandlet
+  errors=0（矩阵/日志产物留本地不入库）；证据 `measured/est_bc=8.52`、
+  `T_CalibHdr` `runtime_mb==measured==1.062`、`high_bpp_count=1`、`M_CalibInst`
+  `usage_api="get_base_material()>used_with_nanite"`。
+- ⚠️ 未发版（AGENTS.md 发布纪律：需用户在当前对话明确授权「发布 vX.Y.Z」）。
+
+## 真机复盘（2026-10-10 L2/L3 暴露：4 个已修 + 1 个待拍板）
+- **#7 TC_HDR 运行时被低估 6~8 倍**：`streaming` 只按 BC(1B/px) 折算，`TC_HDR` 立方图在报告里
+  "隐身"（真实工程 7 张共 1820MB 运行时/1592MB 潜在收益，最大 `hDRI` 1024MB 原本一条都不报）。
+  修法：新增 `POOL_MODEL_VERSION="v2-format-aware-runtime"` + `format_class()` 桶 `high_bpp`
+  + 一本账 `runtime_ledger(metrics)`（**实测 `memory_bytes` 达标即采信、不再乘倍率**；占位值才
+  `est x ratio`），`rules`/`metrics`/`scan_texture_streaming` 同源；high_bpp 只出"钳尺寸/开 VT"
+  建议，**不自动建议改压缩**（改格式=美术决策）。
+- **#8 `used_with_nanite` 对材质实例恒 null**：5.4 直读 `MaterialInstanceConstant.used_with_nanite`
+  抛异常 → 提示"需要补 bUsedWithNanite"永远漏报。修法：`optutil.base_material()`
+  （`get_base_material()` → `prop:base_material` → 原样返回）解包基类材质后重读，
+  `opt_nanite._material_view` 行内记 `usage_api`。夹具加 `M_CalibInst`/`CalibMeshInstance` 靶。
+- **#9 `nanite_translucent_conflict` 把日志枚举当资产名**：5.4/5.3 行尾 `[BLEND_Translucent]`
+  被塞进 `evidence.names`（假资产名）。修法：过滤 `blend*` token + 收紧真名断言用例。
+  注：此为离线规则层（`rules.py`，不碰 `unreal`），由 L0 用例 + 真机日志复验覆盖。
+- **#10 `opt_texture_set_compression` 把"已是目标格式"算成待改项**：真实工程 4 张贴图 dry-run
+  （`only_uncompressed=False` 强改 TC_Default）报 `planned=4`/收益 896.055MB，其中 3 张本来就是
+  `TC_DEFAULT`——既虚报收益、又会白白 save 资产。修法：`_compression_gate` 先做**同名判定**
+  （新纯函数 `_enum_member()` 从 `str(枚举)` 取成员名，跨版本/本地化文本取不到就不判），
+  已是目标格式一律 `no_op` 且行内不带 savings；同名判定优先于 `only_uncompressed` 闸门。
+  夹具补两条回归校验：`compression.already_target_is_no_op`（planned=1，只有 TC_HDR 那张是 change）、
+  `compression.conservative_gate_still_blocks_high_bpp`（默认闸门 planned=0）。
+- ⚠️ **#11（未修，待拍板）冷态 Cube 源边长反推低估**：真实工程 4096 立方 `TC_HDR`（`hDRI`）在纹理
+  未载入时被反推成 2365 边长 -> `runtime_mb` 340MB（`runtime_basis=derived_estimate`），载入后实测
+  1024MB（`resident_memory`），差 3 倍。根因：`texture_source_memory` 里 BPP/面数/mip 链三者耦合，
+  非 2 的幂解也满足误差容限（`source_side_exact=false` 已如实标注，不算谎报）。修法要先造"已知边长
+  的 Cube 真机靶"跨版本校准，属独立决策——本轮不动 `streaming` 数学，读数一律先看 `runtime_basis`。
+- 夹具自污染提醒：跑过 L2 的工程，编辑器日志会留下 10 条 `M_CalibTranslucent` 的
+  `Invalid material ... Nanite` 警告，之后按名归因会命中它们——真实抽检请按资产路径核对或换日志窗口。
+
+## 写操作铁律（所有 `opt_`/`fix_` 遵守，见 AGENTS.md）
+- 默认只读；写入 `dry_run=True`+`confirm=True` 双钥才落盘（server 层 `_as_bool` 归一，domain 层再校验 `confirm`）。
+- 结果一律 `envelope.make_ok/make_err`；错误不伪装 ok；列表带 `total/truncated/cap`。
+- domain 只用 `unreal`+标准库、守 Python 3.7 子集；函数 `@register` 进 `FUNCTIONS`；`server.py` 绝不 import `unreal`。
+- 无引擎时降级返回结构键（不删 `unreal` 分支）；跨版本 `unreal` 签名漂移多候选 try，失败报 `UE_API_MISMATCH`。
+- 模板参考 `prism/domain/migrate.py`（`_try_op`/`_try_op_named`/`_no_engine`）。
+
+## Feature 1 — 纹理流送池超限（诊断 + 批量 VT + 批量钳 MaxTextureSize）
+### 1a 只读分析
+- [x] 新 domain `scan_texture_streaming(folder|map, …)`：聚合流送需求估算、Top 贡献纹理，逐张读 `virtual_texture/compression/max_texture_size/never_stream/lod_group`（复用 `prism/domain/metrics.py`：`max_texture_size`、`compression_settings`、`virtual_texture_streaming`），给「建议钳到多少 / 开 VT / 改压缩」。
+- [x] 新规则进 `prism/rules.py`（PROFILES + finding）：`texture_streaming_overflow`、`oversized_mip`、`uncompressed_texture`（`TC_EDITOR_ICON`/未钳大图）。→ 进 `get_perf_report` 出优化项 + ROI。
+- [x] 离线补充（server 侧，不碰引擎）：解析 `DefaultEngine.ini`/平台 DeviceProfile 读当前 `r.Streaming.PoolSize`，对比估算给「池开多大 / 该降哪些」。
+### 1b 批量写入（双钥）
+- [x] `opt_texture_set_virtual(paths|folder, dry_run, confirm)`：批量 `set_editor_property('virtual_texture_streaming', True)`。前置：Cube/Volume→`skipped`+原因；不支持压缩→报不写；已虚拟→`no_op`。改完 `save_loaded_asset` + 触发重压缩（漂移 `UE_API_MISMATCH`）。
+- [x] `opt_texture_clamp_max_size(paths|folder, max_size, only_if_larger=True, dry_run, confirm)`：批量设 `max_texture_size`（0=不限）；只对超阈值生效；dry-run 出每张 before→after 分辨率 + `est_runtime` 变化。
+- [x] `opt_texture_set_compression`：`Editor Icon`→`Default` 等，池收益大头。
+
+## Feature 2 — 批量开 Nanite（并规避/提示透明材质）
+### 2a 只读分析
+- [x] `scan_nanite_candidates(folder|map)`：按三角面/材质槽列适合开 Nanite 的网格；反查网格材质 `blend_mode`，含 Translucent/Modulate/Additive/双面半透明 → 标「风险（开了也静默失效+刷屏）」。
+- [x] 新规则 `nanite_translucent_conflict`（error）：复用 `prism/attributelog.py`/`read_editor_log` 按指纹把已有 Nanite 透明警告归因到具体资产。
+### 2b 批量写入（双钥）
+- [x] `opt_mesh_set_nanite(paths|folder, enabled=True, skip_translucent=True, dry_run, confirm)`：设 Nanite 开关。跨版本：5.0/5.1 `bSupportsNanite` → 5.3 `NaniteSettings.enabled`/`FMeshNaniteSettings` → 5.4+ 字段再变；多签名 try。命中透明材质默认 `skipped: [{mesh, blend_mode}]`；提示材质还需 `bUsedWithNanite`。
+- [x] `fix_nanite_translucent(folder|paths, dry_run, confirm)`：把已开 Nanite 却挂透明材质的网格关掉 Nanite（消警告/降级）。
+
+## Feature 3 — 场景模型优化（HISM/ISM 合并）
+### 3a 只读分析（复用既有）
+- [x] 复用 `prism/domain/actors.py` 的 `list_level_actors(compose=True)`「重复 StaticMesh 未实例化」机会。
+- [x] `analyze_instancing(min_count=5)`（关卡=当前打开关卡；未做 map/folder 选择器）：输出候选组（按**网格包路径**分组，未细分材质/transform 集合）、可折叠 drawcall/Actor 估计、排除已实例化宿主，并把组内混入非 StaticMeshActor（蓝图放置器）标成 `blockers` 提示人工确认——独立碰撞/Lightmap 覆盖/可交互标记**未纳入判定**（需逐 Actor 语义分析，留给路线 A 的执行前置）。
+- [x] 新规则 `drawcall_batching`（warn）：把机会清单纳入 `get_perf_report` ROI。
+### 3b 执行（按 D2，风险最高）
+- [x] 路线 B（优先）：只生成合并方案/脚本 + 镜像关卡副本，不就地删 Actor。
+- [ ] **未做** 路线 A：`opt_level_merge_hism(map, source_filter, dry_run, confirm)` 用 `HierarchicalInstancedStaticMeshComponent` 折叠同 mesh+同材质的 StaticMeshActor（搬 per-instance transform，保留材质/光照）。API 漂移：`EditorLevelLibrary`→5.3 `LevelEditorSubsystem`。
+- [x] 安全网：默认出 plan（列将被删源 Actor + 将生成的 HISM）；执行双钥；强提示「先提交 VCS/另存关卡副本，UE 无事务级回滚」。
+
+## 测试随功能走（强制）
+- [x] L0 离线：每个新 domain 函数加无引擎降级用例（结构键常驻）；每个 `opt_`/`fix_` 加 dry-run/双钥/`no_engine`/跳过路径用例；新规则加纯逻辑 + `total/truncated/cap` 报告纪律断言。
+- [x] L2 夹具（`scripts/calib_fixture/` + 已登记 `docs/TESTING.md` 真值表与覆盖矩阵）已知真值靶：
+  5.4.4 已实跑 **50/50 全 PASS**（2026-10-10，含 v1.5 新增 28 项）：
+  - 一张 8K/16K 未虚拟大图（VT+钳尺寸，校验前后 `est_runtime`/`max_size`）；
+  - 一张 Cube（VT 应 `skipped`）；
+  - 一个「透明材质上 Nanite」网格（`skip_translucent` 拦截 / `fix_` 关闭）；
+  - 一组 ≥5 重复同 mesh Actor（合批机会真值）；
+  - 一张 `TC_HDR` 立方图（高位深归 `high_bpp`、运行时按实测不二次放大）；
+  - 一个挂 `MaterialInstanceConstant` 的网格（材质槽解包基类材质读 `used_with_nanite`）；
+  - TC_DEFAULT + TC_HDR 一起强改压缩（已是目标格式必须 no_op，默认闸门仍挡高位深）。
+  - `matrix.json` 记录 5.3/5.4+ 三处 API（VT / Nanite / HISM）的 `tried` 命中 → 自动出跨版本兼容矩阵。
+- [x] L3 真实工程抽检（2026-10-10，5.4.4 测试工程：`/Game` 9238 包 / 14.38GB，新导入美术）：
+  `get_perf_report(scope=/Game, sample_size=160)` → 381 findings（error 139 / warn 242）、
+  池需求上界 4341MB（140 张实测，need_clamp 90 / need_vt 104、恒常驻 345MB）、
+  `nanite_translucent_conflict` 0 误报；工程 ini 无任何 `*PoolSize` → 溢出判定诚实降级 `unknown`。
+  `scan_broken_references` 全量分页扫 9244 包（4 秒）→ 18 条悬空硬引用（16 条属新美术：材质
+  指向已删/改名的贴图与网格；另 2 条是夹具自造的 `T_CalibBroken`/`T_CalibStub`）；
+  `fix_broken_references` dry-run 把它们全路由进 `unfixable_missing`（无重定向桩可自动修）。
+  手感：`sample_size=80` 在万级资产工程会系统性欠采样（`high_bpp` 全靠大资产度量面命中）。
+- 合并前：L0 全绿；触碰 unreal 真机路径的写入 → 至少一个引擎版本 L2 全 PASS。
+  **当前状态：L0 345 全绿；L2 5.4.4 50/50 全 PASS（真机路径达标）；仍欠 5.3.2 补跑 v1.5 新增 28 项
+  → 可合并，发版仍需用户明确授权。**
+
+## 里程碑
+- [x] PR-1（只读，低风险）：`scan_texture_streaming` + 3 纹理规则 + `scan_nanite_candidates`/`nanite_translucent_conflict` + `analyze_instancing`/`drawcall_batching`；产出进 `get_perf_report`。附 L0 用例 + L2 夹具靶。
+- [x] PR-2：VT / MaxTextureSize / 压缩 批量写（双钥，含 Cube 与不支持格式跳过）。
+- [x] PR-3：Nanite 写（`opt_mesh_set_nanite` + `fix_nanite_translucent`，主攻跨版本 API）。
+- [~] PR-4：HISM 合批——**只读部分完成**（`analyze_instancing` + `drawcall_batching` 规则 +
+  路线 B 方案落盘）。路线 A 真折叠未做（见 D2），需单独拍板。
+
+## 发布纪律
+- 攒够增量后**停下来问**；只有用户当前对话明确授权「发布 vX.Y.Z」才打 tag / 推 tag / 传 PyPI / 建 Release。版本仅在获授权真正发版时才 bump（`pyproject.toml` + `prism/__init__.py`）。

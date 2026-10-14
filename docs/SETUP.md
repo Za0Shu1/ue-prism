@@ -50,7 +50,10 @@ prism setup --client codex        # codex / opencode / cursor / claude / claude-
 - **`BRIDGE_UNREACHABLE`**：编辑器已关或主线程长时间卡住（大编译/模态框）；恢复后重试。
 - **`AMBIGUOUS_PROJECT`**：多个活跃工程未点名，调用时加 `project=`。
 - **想钉死默认工程**：给 server 传 `--project-dir` 或设 `PRISM_PROJECT_DIR`；显式 `project=` 仍可覆盖。
+- **优化写入语义**：`opt_*` / `fix_nanite_translucent` 只改**资产自身属性**（MaxSize / 虚拟纹理 / 压缩格式 / Nanite 开关），默认 dry-run 出计划，双钥才落盘；改完需编辑器重压缩/重建才反映到盘上与运行时。`analyze_instancing` 只出合批方案（可 `export=True` 落 JSON），**不碰关卡 Actor**。
 - **迁移语义与回滚**：`migrate_asset` 是同工程**镜像复制**（带 uses 闭包、原件不动，天然可弃回）；`migrate_asset_rename` / `migrate_asset_move` 为真改名/真移动，**双钥**（`dry_run=False`+`confirm=True`）才落盘，UE 自动修引用（内存态，需保存），成功后默认清一次重定向桩（`fixup_redirectors=False` 可保留旧路径作回退）。动手前先 `preview_asset_migration` 看影响面；UE 无事务级自动回滚，回退靠保留重定向桩或版本管理。
 - **升级后行为没变**（如 `get_asset_metrics` 缺 `runtime_verdict`/`disk_bytes` 等新字段）：编辑器里的桥加载的是工程内 `Plugins/UEPrism/Content/Python/prism/` 那份**安装时定格的拷贝**，不读 pip 包——`pip install -e .` 或重装 server 都刷不到它，单重启编辑器也没用。改了源码后须重跑 `prism plugin-install --project <P> --yes --force` 覆盖拷贝（顺带删其下 `__pycache__`），**再重启编辑器**；用 `ping` 心跳 + 新字段重新出现确认已换版。
+- **改了 server 侧（`prism/rules.py`/`prism/server.py`）却看不到变化**：MCP 服务是常驻进程，模块在启动时定格，**改完须重启 MCP 服务/客户端**才见效（引擎侧改动相反：`plugin-install --force` + 重启编辑器当场生效，不用重启 MCP）。开发期建议装成可编辑副本，让任何启动方式都指向工作树：
+  `pip install -e .`（自检：`pip show ue-prism` 应有 `Editable project location: <仓库>`；在仓库外的目录跑 `python -c "import prism;print(prism.__file__)"` 也应打印工作树路径）。只读判据：`list_perf_rules` 返回的规则文档串是否已含本轮新增措辞。
 
 > cook / 迁移改名等**写操作**默认 dry-run 预览，需显式确认才落盘。完整安装细节、cook 双钥、跨版本与发布见仓库开发文档。
