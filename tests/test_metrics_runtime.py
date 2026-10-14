@@ -122,3 +122,45 @@ def test_material_slots_from_lods_pure():
     assert M._material_slots_from_lods([{"index": 0}]) is None                # 无 sections
     assert M._material_slots_from_lods([]) is None
     assert M._material_slots_from_lods(None) is None
+
+
+def test_derive_cube_hdr_uses_8bpp_not_rgba8():
+    """5.4 真机回归：T_HDR 源内存 201326592 = 6 x 2048^2 x 8B(HDR/RGBA16)。
+    一律按 4B/px 反推会得出 2896 的假尺寸，进而编出"钳到 2048 省 96MB"的假收益。"""
+    mc = {"source_memory_bytes": 2048 * 2048 * 6 * 8}
+    M._derive_texture_geometry(_FakeTex("TextureCube"), mc)
+    assert mc["source_width"] == 2048
+    assert mc["source_bytes_per_texel"] == 8
+    assert mc["source_side_exact"] is True
+    assert mc["est_runtime_bytes"] == int(2048 * 2048 * 6 * 1.33)
+
+
+def test_derive_marks_inexact_side_when_not_pow2():
+    m = {"source_memory_bytes": 3000 * 3000 * 4}
+    M._derive_texture_geometry(_FakeTex("Texture2D"), m)
+    assert m["source_width"] == 3000 and m["source_side_exact"] is False
+    assert m["source_bytes_per_texel"] == 4
+
+
+def test_verdict_high_bpp_measured_is_not_multiplied_again():
+    """真机 T_HDR：实测 201326592B 已含 8B/px 格式。判定与池估算同源走
+    runtime_ledger，采信实测不得再乘倍率（旧 x4 兜底会把 192MB 报成 768MB）。"""
+    v = M._runtime_verdict(int(288 * MB), {"memory_bytes": 201326592,
+                                           "est_runtime_bytes": 33470545,
+                                           "compression": "TextureCompressionSettings.TC_HDR"})
+    assert v["verdict"] == "runtime_heavy"
+    assert v["runtime_mb"] == 192.0
+    assert v["runtime_basis"] == "resident_memory"
+    assert v["bytes_per_texel"] == 8.0
+    assert "resident_mb" not in v                 # 采信值就是实测值，不重复记一遍
+
+
+def test_verdict_high_bpp_cold_upload_scales_estimate():
+    """冷态实测只是占位 -> 按 BC 近似 x8 兜底，别再用 1B/px 低估成 normal。"""
+    v = M._runtime_verdict(int(30 * MB), {"memory_bytes": 24576,
+                                          "est_runtime_bytes": int(4 * MB),
+                                          "compression": "TextureCompressionSettings.TC_HDR"})
+    assert v["verdict"] == "runtime_heavy"
+    assert v["runtime_mb"] == 32.0
+    assert v["runtime_basis"] == "derived_estimate"
+    assert v["resident_mb"] == round(24576 / 1048576.0, 3)

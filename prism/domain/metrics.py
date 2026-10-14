@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 
-from .. import envelope
+from .. import envelope, streaming as _st
 from . import register
 from .assets import _asset_data, _class_name, _disk_size, _name_str, _normalize, _registry
 
@@ -125,6 +125,15 @@ def _measure_texture(unreal, obj, tried):
             m["virtual_texture"] = bool(v)
             tried.append("prop:" + key)
             break
+    # 流送池判定要的两项：never_stream（池外常驻）与 lod_group（组级 MaxSize/偏差）
+    ns = _prop(obj, "never_stream")
+    if ns is not None:
+        m["never_stream"] = bool(ns)
+        tried.append("prop:never_stream")
+    lg = _prop(obj, "lod_group")
+    if lg is not None:
+        m["lod_group"] = str(lg)
+        tried.append("prop:lod_group")
     for key in ("array_size", "slices"):
         v = _prop(obj, key)
         if v is not None:
@@ -142,26 +151,26 @@ def _measure_texture(unreal, obj, tried):
     return m
 
 
-SRC_BYTES_PER_TEXEL = 4        # 源=未压缩 RGBA8
 BC_BYTES_PER_TEXEL = 1.0       # 运行时近似：TC_Default(BC1/BC3) 约 1B/px
 MIP_CHAIN_FACTOR = 1.33        # 全 mip 链体积 ~ 1/(1-1/4)
 
 
 def _faces_of(cls_name, array_size):
-    faces = 6 if (cls_name and "Cube" in cls_name) else 1
-    try:
-        n = int(array_size or 1)
-    except (TypeError, ValueError):
-        n = 1
-    return faces * max(n, 1)
+    """面数（Cube 6 面 x slice 数）：口径取自 streaming，与池估算同源。"""
+    return _st.faces_for(cls_name, array_size)
 
 
 def _derive_texture_geometry(obj, m):
-    """由 source_memory 反推边长（正度假设），并按 max_size 折算运行时估算。
+    """由 source_memory 反推源边长，并按 max_size 折算运行时估算。
 
     5.4 实证：blueprint_get_size_x/y 在资源上传前返回 32x32 占位，而 Cube 根本没有
     尺寸 API；source_memory_bytes 从载入起就真。估算口径保守（BC 近似），
     仅用于真大/假大判定与 width 缺失时的兜底，标注 size_derived 供消费方辨别。
+
+    源位图不一定是 RGBA8：HDR/RGBA16 是 8B/px、FP32 是 16B/px，Cube 还要摊 6 面。
+    一律按 4B/px 反推会把 6x2048^2x8B 的立方图推成 2896 这种假尺寸（5.4 真实工程
+    实测），进而编出"钳到 2048 省 96MB"的假收益。故走 streaming.source_side_from_memory
+    的多候选 BPP + "2 的幂"校验，并把命中的 BPP 与 exact 标记一起回传，便于核对。
     """
     cls_name = None
     try:
@@ -169,17 +178,16 @@ def _derive_texture_geometry(obj, m):
     except Exception:
         pass
     faces = _faces_of(cls_name, m.get("array_size"))
-    side = None
+    side = 0
+    bpp = 0
+    exact = False
     src_mem = m.get("source_memory_bytes")
     if src_mem:
-        try:
-            area = float(src_mem) / (SRC_BYTES_PER_TEXEL * faces)
-            if area > 0:
-                side = int(round(area ** 0.5))
-        except (TypeError, ValueError):
-            side = None
+        side, bpp, _faces, exact = _st.source_side_from_memory(src_mem, faces)
     if side:
         m["source_width"] = side
+        m["source_bytes_per_texel"] = bpp
+        m["source_side_exact"] = bool(exact)
         cur = int(m.get("width") or 0)
         if not cur or cur <= 64:
             # 冷态直读是占位值(<=64)：width 用源反推兜底
@@ -302,21 +310,21 @@ def _runtime_verdict(disk_bytes, m):
     if not isinstance(m, dict):
         return {"verdict": "unknown", "reason": "no_metrics"}
     # 5.4 真机校准：常驻内存(blueprint_get_memory_size)在编辑器里可能是未上传/半流送的
-    # 占位小值；改用 max(实测, 属性估算 est_runtime_bytes) 作运行时规模，两者都有则并列。
+    # 占位小值。运行时规模走 streaming.runtime_ledger（实测优先，实测没上传才按格式倍率
+    # 折算估算），与池估算同源：同一张 TC_HDR 立方图不能在 metrics 里 192MB、
+    # 在 scan_texture_streaming 里 31.9MB（实测 8B/px vs BC 近似 1B/px 差 6 倍）。
+    ledger = _st.runtime_ledger(m)
+    runtime = ledger["runtime_bytes"]
     try:
         mem = float(m.get("memory_bytes") or 0)
     except (TypeError, ValueError):
         mem = 0.0
-    try:
-        est = float(m.get("est_runtime_bytes") or 0)
-    except (TypeError, ValueError):
-        est = 0.0
-    runtime = max(mem, est)
     if runtime > 0:
         mem_mb = runtime / 1048576.0
         out = {"runtime_mb": round(mem_mb, 3),
-               "runtime_basis": ("derived_estimate" if est >= mem else "resident_memory")}
-        if mem and est:
+               "runtime_basis": ledger["runtime_basis"],
+               "bytes_per_texel": ledger["runtime_bytes_per_texel"]}
+        if mem and runtime != mem:
             out["resident_mb"] = round(mem / 1048576.0, 3)
         if mem_mb >= RUNTIME_HEAVY_MEM_MB:
             out["verdict"] = "runtime_heavy"
