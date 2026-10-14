@@ -9,7 +9,7 @@
 |---|---|---|---|
 | **L0 离线套件** | 无引擎，Python>=3.10 | `python -m pytest` | 协议/信封/总线/规则纯逻辑/降级结构契约。改任何层必跑 |
 | **L1 桥冒烟** | 编辑器在线 | `python scripts/verify_connection.py`；`python scripts/bus_call.py <bus_dir> ping` | 心跳、往返、UE 版本 |
-| **L2 校准夹具** | 任意 UE5 工程装好桥插件（编辑器在线） | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 50 项校验（含写路径 rename/move/copy 往返 + v1.5 优化族 28 项属性读写往返，均自还原，见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
+| **L2 校准夹具** | 任意 UE5 工程装好桥插件（编辑器在线） | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 53 项校验（含写路径 rename/move/copy 往返 + v1.5 优化族 28 项属性读写往返，均自还原，见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
 | **L2/L3 cook·package 全链路** | 任意 UE5 工程 + 本机 UE（**编辑器须关闭**） | `python scripts/verify_cook_chain.py --project <P> [--mode cook\|package]` | cook_package 真实全链路：dry-run 组装→双钥真执行→轮询状态→校验产物落盘→日志错误归因。`--mode cook` 校验 cooked `.umap`（9 项，L2）；`--mode package` 真编 `-build -cook -stage -pak -archive` 并校验归档内 `.exe`/`.pak`（10 项，L3——首编耗时长）。因需编辑器关闭、且不经过桥，与 run_fixture 互斥、单独成脚本 |
 | **L3 真实工程抽样** | 客户的真实大工程 | 人工驱动 MCP 工具 + 抽检 | 假阳性率、大闭包耗时、阈值手感 |
 
@@ -89,13 +89,17 @@
   跨版本各跑一次即得 **VT / MaxSize / Nanite 三处属性签名 + HISM 探针**的兼容矩阵。
 - ✅ 5.4.4 已真机验收 **50/50 全 PASS**（2026-10-10，夹具 errors=0，矩阵/日志留本地 `_internal/`）。
   ⚠️ 5.3 尚未带上这 28 项复跑，跨版本矩阵仍欠 5.3 一行。
+- ✅ 2026-10-14 在真实大工程（9242 资产 / 14.4GB，3163 纹理 + 1898 网格）复跑 **53/53 全 PASS**，
+  且**同一编辑器会话连跑两轮**都绿。真实工程照出两处只在真机才会暴露的缺陷：
+  注册表**多导出包按导出重复计数**（一个 HLOD 包占 76 格、400 格纹理窗口里 125 项"读不到尺寸"、
+  池需求只报得出真实值的一小截——160 格窗口仅量到 35 张）与**单包引用查询失败被误判成整场 API 漂移**（残留内存态复制靶让同会话第二轮夹具必崩）。
 
 
 
 ## v1.5 优化族的真机验收（5.4 已跑，5.3 待补）
 
-本轮在有编辑器的机器上完成：L0 345 用例（344 passed / 1 skipped）全绿，5.4.4 夹具
-**50/50 真机全 PASS**。合并/发版前仍须在 UE 5.3（以及 5.5/5.8 等）各跑一次 `run_fixture`
+本轮在有编辑器的机器上完成：L0 355 用例（354 passed / 1 skipped）全绿，5.4.4 夹具
+**53/53 真机全 PASS**。合并/发版前仍须在 UE 5.3（以及 5.5/5.8 等）各跑一次 `run_fixture`
 并归档 `matrix.json`：
 
 ```bash
@@ -103,7 +107,7 @@ python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor
     --matrix _internal/matrix-<版本>-v15.json
 ```
 
-预期 50/50 全 PASS。红了不要放宽断言，按证据补候选签名：
+预期 53/53 全 PASS。红了不要放宽断言，按证据补候选签名：
 - `nanite.force_write_honest` → 看 `matrix.opt_nanite.nanite_api` 命中哪条（5.0/5.1
   `supports_nanite` / 5.3 `nanite_settings.enabled` / 5.4+ `nanite_enabled`）；没命中就是真
   漂移，往 `opt_nanite.NANITE_FLAT_PROPS` 补候选。
@@ -140,11 +144,11 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 
 ## 引擎兼容矩阵（实测）
 
-同一套 `run_fixture`（50 项：域层 `unreal` API + 规则）与 `verify_cook_chain`（cook 9 项 / package 10 项）在不同引擎版本各跑一次即成矩阵。当前实测：
+同一套 `run_fixture`（53 项：域层 `unreal` API + 规则 + 枚举不变量）与 `verify_cook_chain`（cook 9 项 / package 10 项）在不同引擎版本各跑一次即成矩阵。当前实测：
 
 | 引擎 | L2 夹具 run_fixture | cook 全链路 | package 全链路 |
 |---|---|---|---|
-| UE 5.4.4 | **50/50**（2026-10-10 实跑，含 v1.5 优化族 28 项 + HDR 高位深/材质实例/压缩同名 no_op 靶；errors=0） | 9/9（695 包/0 error） | Development + Shipping 各 10/10 |
+| UE 5.4.4 | **53/53**（2026-10-14 真实大工程复跑、同会话两轮；含 v1.5 优化族 28 项 + HDR 高位深/材质实例/压缩同名 no_op 靶 + 一包一条/冲突拒写 3 项不变量；errors=0。2026-10-10 首轮 50/50） | 9/9（695 包/0 error） | Development + Shipping 各 10/10 |
 | UE 5.3.2 | 22/22（v1.5 新增 28 项**待复跑**，含 HDR 高位深/材质实例/压缩同名 no_op 靶） | 9/9 | Development + Shipping 各 10/10 |
 
 - 域层跨版本靠多签名 `try` 兜底，`tried` 实测两版一致：`used_by`/`get_dependencies`=`name+opts`；纹理尺寸无直读 API → `blueprint_get_memory_size` + 源盘反推；5.3/5.4 `EditorAssetLibrary.move_asset` 皆 `AttributeMissing` → 走 `rename_asset` 兜底。
@@ -153,7 +157,7 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 - 5.4.4 实测签名命中（本轮夹具矩阵）：Nanite 走 `nanite_settings.enabled`；MaxSize 走
   `set_editor_property(max_texture_size)`；材质混合模式走 `get_blend_mode()`；`used_with_nanite`
   材质本体直读、材质实例必须 `get_base_material()>used_with_nanite`；纹理尺寸无直读 API（Cube 全靠源盘反推）。
-- 本机覆盖状态：**5.4.4 夹具 50/50 + cook 9/9 + package Dev/Shipping 各 10/10**；
+- 本机覆盖状态：**5.4.4 夹具 53/53 + cook 9/9 + package Dev/Shipping 各 10/10**；
   5.3.2 仍是旧 22 项全绿，**v1.5 优化族与 HDR 台账未在 5.3 复跑**。更多版本（5.5/5.8 等）在其他机器补跑。
 
 ## 工具覆盖矩阵（当前 29 个 MCP 工具）
@@ -166,7 +170,8 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 | `scan_broken_references`（悬空/坏引用检测） | test_assets(+2 用例:降级结构键常驻/_dep_resolution_status 三态) | refs.broken_missing_target（已知 missing 靶 M_CalibBroken→T_CalibBroken + 健康靶负控） | 真实工程重定向桩(redirector)修复闭环、软引用漏检面（L3） |
 | `fix_broken_references`（写·双钥） | test_migrate(+4 用例:双钥守卫/无引擎降级[读+写]/dry_run fixable-missing 路由) | refs.fix_plan_routing（真机路由 stub 靶进 missing） / refs.fix_write_honest（confirm 落盘 executed 不崩、诚实回报） | redirector 桩自动修复正样本（5.4 python 不留桩 → L3）；missing 需人工 VCS 还原/重指向 |
 | `get_asset_chain`（环/god/影响半径） | test_assets(+SCC 纯逻辑) / test_buscall | -（小图 smoke） | 真实大工程的大闭包耗时、god_min_refs 阈值手感 |
-| `scan_orphan_assets` | test_orphan_degrade | orphan.targets_found / map_not_orphaned | 真实工程假阳性抽检 >=20 条 |
+| `scan_orphan_assets`（一包一条 + 单包引用查询失败降级） | test_orphan_degrade / test_scan_orphan_ref_failure（3 用例：单包失败不带走整场扫描、整窗全失败仍报 UE_API_MISMATCH、降级结构键常驻） | orphan.targets_found / map_not_orphaned | 真实工程假阳性抽检 >=20 条 |
+| 注册表枚举去重（`_dedupe_by_package` / `_export_object_path`：多导出包一包一条） | test_asset_enumeration_dedupe（7 用例：窗口挤占、类误标、`prefer_terms` 选代表导出、无 `object_path` 才回退 `package.leaf`、孤儿计数） | enumerate.scan_one_row_per_package / enumerate.opt_rows_unique_and_measurable | 5.0/5.1 无 `get_object_path` 的回退形状只有离线用例覆盖，待该版本真机复跑 |
 | `get_asset_metrics`（真大/假大+材质槽） | test_metrics_degrade / test_metrics_runtime | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat / mesh_material_slots | 真实美术资产压缩格式下 est 口径偏差；碰撞面数 5.4 `UStaticMesh` python 无访问器（绑定限制，见资产表 CalibMesh 行）|
 | `list_level_actors`（compose） | test_actors_compose | compose.world_ge_1400 / cube_batching_opportunity | 真实 WP 关卡全载成本 |
 | `read_editor_log`（P2 指纹归一+资产归因+按会话切分） / `attribute_cook_errors` | test_logscan(+3 会话用例:多会话拆分/每会话计数/单会话不标多) / test_attribute | -（纯离线，真实工程日志直读验证 distinct 194->10、LogPackageName 196 合 1 组归因 195 资产） | 与真实 cook 日志联动的归因抽检 |
@@ -174,8 +179,8 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 | `get_perf_report`（12 规则+降档+ROI 注解+vs-上次 diff+可配采样/cap） | test_rules(+4 用例:annotate_roi 纯逻辑/run_report 带 roi_summary/report diff vs previous/snapshot disabled) / test_rules_runtime / test_rules_opt(22 用例:5 条 v1.5 新规则纯逻辑+ROI 两本账 unit+high_bpp 三档收益与"默认不代改压缩"+缺桥时必须播报不静默) | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded / cap_truncates_and_flags_hidden_errors / sampling_fields | sample_size/cap 可配（默认 top-80/cap=50）；大工程须显式调大 sample_size 或缩 scope。5.4 真机实测 sample_size 80→200 使 total 245→356（暴露 73 个被旧硬编码藏起的 error）；本轮 160 抽样在 14.38GB 美术工程得 381 findings（error 139/warn 242，含 7 条 high_bpp、0 条误报 Nanite 冲突）|
 | `cook_package` / `get_cook_status`（cook+package） | test_cook(含 `test_package_command_template` package 模板)/ test_tasks | `--mode cook` 真机 9 项：uproject/编辑器关闭前置/dry 组装(+maps 定位)/双钥启动/状态收敛/succeeded(exit0)/cooked `CalibMap.umap` 落盘/`attribute_cook_errors` 0 错误组（UE5.4 实跑 BUILD SUCCESSFUL，695 包/0 error）。`--mode package` 真机 10 项：另走 `-build -cook -stage -pak -archive` 全链路，校验归档内 `.exe`+`.pak`（UE5.4 实跑 BUILD SUCCESSFUL/exit 0，exe+9.6MB pak 落盘/0 error 组；`--configuration Shipping` 另跑亦 10/10） | 跨版本 cook/package 兼容（5.3/5.8 各跑一次归档 matrix.json）；真实大工程 package 抽样 |
 | `preview_asset_migration` | test_migration_preview | - | - |
-| `migrate_asset_rename` / `_move` / `_asset`（写） | test_migrate / test_migrate_engine_shapes（双钥/dry_run/回滚/属性缺失形状） | migrate.rename_applies_redirect / rename_restored / move_applies / move_restored / copy_dryrun_plan / copy_applies（真机 rename_asset + 5.4 move→rename 兜底，内存态自还原；copy 走 `migrate_asset` duplicate 带走 uses 闭包 2 包 + 目标目录自动建 `make_directory`，内存态不落盘） | 真实工程提交后引用复核；`fix_up_redirectors` 5.4 python 未绑定（诚实报告未确认清理，编辑器手动兜底） |
-| `scan_texture_streaming`（只读池诊断） | test_streaming_model（34 用例：钳尺寸/VT 可行性/格式四分类 compressed-uncompressed-no_stream-high_bpp-unknown/`runtime_ledger` 实测优先不重复乘/两本账汇总封顶/池对照/ini 优先级） + test_opt_texture（降级结构键含 high_bpp、cap 与窗口独立） | streaming.clamp_target_planned / clamped_texture_not_reflagged / editoricon_is_permanent_not_uncompressed / vt_skip_cube / hdr_bucketed_high_bpp / hdr_runtime_not_bc_estimate / hdr_measured_not_multiplied_again / hdr_metrics_and_scan_same_ledger / hdr_not_auto_recompressed / summary_separates_ledgers / summary_counts_high_bpp / pool_ini_read | 真实大工程的 `est_runtime` 与实测显存偏差；池需求上界 vs 实际驻留的手感（5.4 真实工程：抽样 140 张纹理池需求上界 4.2GB，其中 7 张 TC_HDR 立方图占 1.8GB） |
+| `migrate_asset_rename` / `_move` / `_asset`（写） | test_migrate / test_migrate_engine_shapes（双钥/dry_run/回滚/属性缺失形状） | migrate.rename_applies_redirect / rename_restored / move_applies / move_restored / copy_dryrun_plan / copy_applies / copy_conflict_refused（真机 rename_asset + 5.4 move→rename 兜底，内存态自还原；copy 走 `migrate_asset` duplicate 带走 uses 闭包 2 包 + 目标目录自动建 `make_directory`，内存态不落盘；每次跑用唯一 dest 并清理历史 `copy*` 残留，同名冲突必须结构化拒写） | 真实工程提交后引用复核；`fix_up_redirectors` 5.4 python 未绑定（诚实报告未确认清理，编辑器手动兜底） |
+| `scan_texture_streaming`（只读池诊断） | test_streaming_model（34 用例：钳尺寸/VT 可行性/格式四分类 compressed-uncompressed-no_stream-high_bpp-unknown/`runtime_ledger` 实测优先不重复乘/两本账汇总封顶/池对照/ini 优先级） + test_opt_texture（降级结构键含 high_bpp、cap 与窗口独立） | streaming.clamp_target_planned / clamped_texture_not_reflagged / editoricon_is_permanent_not_uncompressed / vt_skip_cube / hdr_bucketed_high_bpp / hdr_runtime_not_bc_estimate / hdr_measured_not_multiplied_again / hdr_metrics_and_scan_same_ledger / hdr_not_auto_recompressed / summary_separates_ledgers / summary_counts_high_bpp / pool_ini_read / enumerate.scan_one_row_per_package / enumerate.opt_rows_unique_and_measurable | 真实大工程的 `est_runtime` 与实测显存偏差；池需求上界 vs 实际驻留的手感（5.4 真实工程：抽样 140 张纹理池需求上界 4.2GB，其中 7 张 TC_HDR 立方图占 1.8GB） |
 | `opt_texture_set_virtual` / `opt_texture_clamp_max_size` / `opt_texture_set_compression`（写·双钥） | test_opt_texture(+双钥/字符串 bool 归一/负 max_size/建议文案/high_bpp 闸门/别名解析/同名格式 no_op + `_enum_member` 文本形态) + test_opt_server_contract(脏 bool 不建客户端/export 原子写) | streaming.clamp_dry_run_does_not_write / clamp_write_honest / clamp_readback_from_disk / clamp_restored_for_next_run / vt_write_blocks_cube / compression.already_target_is_no_op / conservative_gate_still_blocks_high_bpp | 重压缩时机与盘上体积回落（改压缩需编辑器重压缩，cook 前磁盘不变）；`bUsedWithVT` 需工程开 VT 才有真收益；TC_HDR 需 `only_uncompressed=False` 才动（默认挡在闸门外） |
 | `scan_nanite_candidates`（只读） | test_opt_nanite（27 用例：分类六态 + 降级键常驻 + `base_material()` 三态解包 + 材质清单非 null） | nanite.target_blocked_before_write / conflict_detected / material_usage_readable_via_base_material / material_instance_usage_not_null | 真实高模候选阈值手感（`min_triangles`）；真实工程某网格 5 材质经 `get_base_material()` 全部读到确定值 |
 | `opt_mesh_set_nanite` / `fix_nanite_translucent`（写·双钥） | test_opt_nanite（三条版本签名钉死 + 写不进必须 failed + 半透明拦截 + blend_mode 读不到保守跳过） | nanite.skip_translucent_blocks / force_write_honest / fix_write_honest / self_restored | 材质 `bUsedWithNanite` 只报不改（动材质另议）；真实工程警告回落抽检 |
@@ -195,6 +200,9 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 ## 已知限制
 
 - 夹具不测渲染性能（无材质/光照变体），它校准的是**工具判定逻辑与 API 命中率**。
+- 夹具的写校验是**内存态自还原**：强杀编辑器（`Stop-Process`）会留下未保存改动，下次启动弹
+  `Restore Packages` 模态框把桥自启卡住（桥在弹窗后才起）。要么用 `run_fixture --close-editor`
+  优雅关闭，要么重启前删 `<工程>/Saved/Autosaves/PackageRestoreData.json`。
 - `probe_asset_api` 是校准辅助工具（未列入对外承诺），随夹具排障使用。
 - 跨版本资产拷贝**只向后兼容**（旧版引擎打不开新序列化）——这正是夹具选择"代码现场生成"而非入库二进制的原因。
 - **改了 server 侧（`prism/rules.py`/`prism/server.py`），已在线的 MCP 服务不自动生效**——它是常驻
