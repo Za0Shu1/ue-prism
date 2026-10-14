@@ -19,22 +19,37 @@ try:  # tomllib 仅 3.11+；3.10 用等价的 tomli（见 pyproject 条件依赖
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from . import attributelog, bus, folderscan, tasks
+from . import attributelog, bus, folderscan, logscan, streaming, tasks
 
 PROFILES = {
     "pc": {"asset_size_mb": {"warn": 20.0, "error": 100.0},
            "texture_px": {"warn": 2048, "error": 4096},
            "mesh_tri": {"warn": 200000, "error": 1000000, "mat_slots_warn": 8},
+           "texture_streaming": {"min_demand_mb": 32.0, "tight_pct": 80.0},
+           "mip_clamp": {"min_savings_mb": 4.0, "error_savings_mb": 16.0},
+           "uncompressed_texture": {"min_mb": 1.0, "error_mb": 16.0},
+           "nanite_translucent": {"min_count": 1, "log_tail": 60000},
+           "batching": {"min_group_actors": 5, "min_collapsible": 100, "warn_share_pct": 50.0},
            "wps_external_actors": {"warn": 300, "error": 1000},
            "scene_light_dup": {"max_dup": 1}},
     "console": {"asset_size_mb": {"warn": 10.0, "error": 50.0},
                 "texture_px": {"warn": 2048, "error": 4096},
                 "mesh_tri": {"warn": 150000, "error": 500000, "mat_slots_warn": 4},
+           "texture_streaming": {"min_demand_mb": 32.0, "tight_pct": 80.0},
+           "mip_clamp": {"min_savings_mb": 4.0, "error_savings_mb": 16.0},
+           "uncompressed_texture": {"min_mb": 1.0, "error_mb": 16.0},
+           "nanite_translucent": {"min_count": 1, "log_tail": 60000},
+           "batching": {"min_group_actors": 5, "min_collapsible": 100, "warn_share_pct": 50.0},
                 "wps_external_actors": {"warn": 300, "error": 1000},
                 "scene_light_dup": {"max_dup": 1}},
     "mobile": {"asset_size_mb": {"warn": 5.0, "error": 20.0},
                "texture_px": {"warn": 1024, "error": 2048},
                "mesh_tri": {"warn": 50000, "error": 150000, "mat_slots_warn": 4},
+           "texture_streaming": {"min_demand_mb": 16.0, "tight_pct": 85.0},
+           "mip_clamp": {"min_savings_mb": 2.0, "error_savings_mb": 8.0},
+           "uncompressed_texture": {"min_mb": 0.5, "error_mb": 8.0},
+           "nanite_translucent": {"min_count": 1, "log_tail": 60000},
+           "batching": {"min_group_actors": 4, "min_collapsible": 60, "warn_share_pct": 60.0},
                "wps_external_actors": {"warn": 200, "error": 600},
                "scene_light_dup": {"max_dup": 1}},
 }
@@ -134,10 +149,42 @@ def _ensure_metrics(ctx):
 
 
 def _ensure_actors(ctx):
+    """一次总线往返同时取 actor 清单与场景构成（compose=True 的 composition 覆盖全关卡，
+    不受 actors 的 limit 截断影响——合批判定因此看到的是完整关卡）。"""
     if "actors" not in ctx:
-        r = bus.BusClient(ctx["bus_dir"], timeout=60).call("list_level_actors", {"limit": 2000})
-        ctx["actors"] = r["result"]["actors"] if r.get("ok") else None
+        r = bus.BusClient(ctx["bus_dir"], timeout=120).call(
+            "list_level_actors", {"limit": 2000, "compose": True, "composition_cap": 20})
+        res = r["result"] if r.get("ok") else None
+        ctx["actors"] = res["actors"] if res else None
+        ctx["composition"] = res.get("composition") if res else None
     return ctx["actors"]
+
+
+def _ensure_composition(ctx):
+    if "composition" not in ctx:
+        _ensure_actors(ctx)
+    return ctx.get("composition")
+
+
+def _ensure_pool_entries(ctx):
+    """把 metrics 的纹理条目换成流送池条目（口径与 scan_texture_streaming 同源）。"""
+    if "pool_entries" not in ctx:
+        th_px = ctx["profile"]["texture_px"]
+        rows = []
+        for pkg, it in sorted(_ensure_metrics(ctx).items()):
+            m = it.get("metrics")
+            cls = it.get("class")
+            if not isinstance(m, dict) or not cls:
+                continue
+            if "texture" not in str(cls).lower():
+                continue
+            entry = streaming.texture_pool_entry(m, cls, it.get("disk_bytes"),
+                                                 px_error=int(th_px["error"]),
+                                                 px_warn=int(th_px["warn"]))
+            entry["package"] = pkg
+            rows.append(entry)
+        ctx["pool_entries"] = rows
+    return ctx["pool_entries"]
 
 
 def _cook_records(ctx):
@@ -248,7 +295,7 @@ def _rule_texture_size(ctx):
         else:
             continue
         # 5.4 真机校准：源尺寸大但运行时已被 MaxSize 限到很小 -> 非显存问题，降 warn
-        est_mb = (m.get("est_runtime_bytes") or 0) / 1048576.0
+        est_mb = streaming.runtime_ledger(m)["runtime_bytes"] / 1048576.0
         capped_small = bool(m.get("max_size")) and 0 < est_mb <= 1.0
         if sev == "error" and capped_small:
             sev, limit = "warn", int(th["warn"])
@@ -386,6 +433,282 @@ def _rule_cook_empty_maps(ctx):
     return out
 
 
+# ---- v1.5 优化族规则（TODO Feature 1/2/3；口径与 opt_* 工具同源 prism/streaming.py）----
+
+# 真冲突短语。5.3 真实工程（ProjectA，4623 条同源）实测文本：
+#   LogStaticMesh: Warning: Invalid material [M_X] used on Nanite static mesh [SM_Y].
+#   Only opaque or masked blend modes are currently supported, [BLEND_Translucent]
+#   blend mode is not supported with Nanite enabled.
+# 5.4/更新的写法用 "... blending mode of 'Translucent' which isn't supported by Nanite mesh ..."。
+_NANITE_TRANSLUCENT_PHRASES = ("used on nanite static mesh", "supported by nanite",
+                               "only opaque or masked", "invalid material")
+_NANITE_TRANSLUCENT_MARKERS = ("translucent", "modulate", "additive",
+                               "blend mode", "blending mode", "blendmode")
+# 5.4 真机误报教训：LogMaterial 的着色器统计行（Display 级、单条上百 KB）同时含
+# "nanite" 与 "translucent"，只靠关键词会炸出一条 error。级别必须是 Warning/Error/Fatal。
+_LOG_WARN_LEVEL_RE = re.compile(r":\s*(?:warning|error|fatal)\s*:", re.IGNORECASE)
+# 冲突日志里的名字在方括号里且不带 /Game 路径（[M_X] / [SM_Y]），单独按名归因；
+# 字符类只留标识符字符，天然排除 "[2026.09.29-08.00.00:000]" 这类时间戳前缀。
+_LOG_BRACKET_NAME_RE = re.compile(r"\[\s*([A-Za-z0-9_.\-]{2,120}?)\s*\]")
+
+
+def _rule_texture_streaming_overflow(ctx):
+    """聚合池需求(上界) vs 工程 ini 里的 r.Streaming.PoolSize —— 给"总账"而非逐张。
+
+    demand 来自本次采样纹理度量（覆盖面由 sample_size 决定，返回体 sampling 已标注）；
+    pool 来自磁盘 ini（不需引擎）。判不出池就不下"超限"结论，只报需求（不猜默认值）。
+    """
+    th = ctx["profile"]["texture_streaming"]
+    entries = _ensure_pool_entries(ctx)
+    if not entries:
+        return []
+    agg = streaming.aggregate(entries)
+    demand = float(agg["pool_demand_mb"])
+    config = streaming.read_pool_config(ctx["project_dir"])
+    verdict = streaming.compare_pool(demand, config["effective_mb"],
+                                     tight_pct=float(th["tight_pct"]),
+                                     min_demand_mb=float(th["min_demand_mb"]))
+    if verdict["verdict"] == "ok":
+        return []
+    sev = "error" if verdict["verdict"] in ("overflow", "disabled") else "warn"
+    # 与 opt_texture 工具同口径：池内 + 池外常驻都是要花的显存
+    top = sorted(entries, key=lambda e: (-(float(e.get("pool_mb") or 0.0)
+                                          + float(e.get("permanent_mb") or 0.0)),
+                                         str(e.get("package"))))[:5]
+    evidence = {
+        "verdict": verdict["verdict"],
+        "pool_demand_mb": verdict["demand_mb"],
+        "pool_mb": verdict["pool_mb"],
+        "overflow_mb": verdict["overflow_mb"],
+        "ratio_pct": verdict["ratio_pct"],
+        "permanent_mb": agg["permanent_mb"],
+        "virtualized_mb": agg["virtualized_mb"],
+        "potential_pool_release_mb": agg["potential_pool_release_mb"],
+        "need_clamp_count": agg["need_clamp_count"],
+        "need_vt_count": agg["need_vt_count"],
+        "uncompressed_count": agg["uncompressed_count"],
+        "non_streaming_count": agg["non_streaming_count"],
+        "potential_permanent_release_mb": agg["potential_permanent_release_mb"],
+        "measured_textures": agg["measured"],
+        "pool_source": config["effective"],
+        "pool_note": config["note"],
+        "vt_enabled_project": streaming.vt_enabled(config),
+        "top_contributors": [{"package": e["package"], "pool_mb": e["pool_mb"],
+                              "permanent_mb": e.get("permanent_mb")}
+                             for e in top if e.get("package")],
+    }
+    evidence = {k: v for k, v in evidence.items() if v not in (None, {}, [])}
+    if verdict["verdict"] == "unknown":
+        advice = ("工程 ini 未配 *PoolSize，%sMB 池需求无对照：先定池预算"
+                  "（大工程常见根因是根本没配池，而不是池配小了），再按逐张规则降需求"
+                  % demand)
+    elif verdict["verdict"] == "disabled":
+        advice = ("PoolSize<=0 等价不设上限（全部常驻），%sMB 直接压显存："
+                  "先降需求（钳尺寸/虚拟化/改压缩）再开池" % demand)
+    elif verdict["verdict"] == "overflow":
+        advice = ("池需求(上界) %sMB > 配置池 %sMB：先用 opt_texture_clamp_max_size / "
+                  "opt_texture_set_virtual / opt_texture_set_compression 降需求，"
+                  "而不是一路加大 r.Streaming.PoolSize" % (demand, verdict["pool_mb"]))
+    else:
+        advice = ("池需求(上界) %sMB 已到配置池 %sMB 的告警线：按 oversized_mip/"
+                  "uncompressed_texture 逐张降需求最划算" % (demand, verdict["pool_mb"]))
+    return [{"rule_id": "texture_streaming_overflow", "severity": sev,
+             "subject": "%s (scope)" % ctx["scope"],
+             "evidence": evidence,
+             "threshold": verdict["pool_mb"], "advice": advice}]
+
+
+def _rule_oversized_mip(ctx):
+    """未钳 MaxSize 的超大纹理：整条 mip 链进池，批量钳是成本最低的降需求手段。"""
+    th_px = ctx["profile"]["texture_px"]
+    th = ctx["profile"]["mip_clamp"]
+    out = []
+    for e in _ensure_pool_entries(ctx):
+        if "clamp_max_size" not in (e.get("actions") or []):
+            continue
+        saving = float(e.get("clamp_savings_mb") or 0.0)
+        if saving < float(th["min_savings_mb"]):
+            continue
+        px = int(e.get("source_width") or e.get("effective_width") or 0)
+        if px >= int(th_px["error"]) and saving >= float(th["error_savings_mb"]):
+            sev, limit = "error", int(th_px["error"])
+        else:
+            sev, limit = "warn", float(th["min_savings_mb"])
+        evidence = {"source_width": px, "max_size": e.get("max_size"),
+                    "clamp_to": e.get("clamp_to"), "savings_mb": saving,
+                    "pool_mb": e.get("pool_mb"), "runtime_mb": e.get("runtime_mb"),
+                    "virtual_texture": e.get("virtual_texture"),
+                    "compression": e.get("compression"),
+                    "effective_width": e.get("effective_width")}
+        evidence = {k: v for k, v in evidence.items() if v is not None}
+        out.append({"rule_id": "oversized_mip", "severity": sev,
+                    "subject": e["package"], "evidence": evidence, "threshold": limit,
+                    "advice": "整条 mip 链进池：opt_texture_clamp_max_size(max_size=%s) "
+                              "批量钳（先 dry-run 看每张 before→after）" % e.get("clamp_to")})
+    return out
+
+
+def _rule_uncompressed_texture(ctx):
+    """非工程运行时压缩格式，三本账分开算（同一个 MB 不重复报价）。
+
+    - uncompressed（真未压缩/浮点系）：按 4B/px 计，比 BC 贵 4 倍，池与包体双输；
+    - high_bpp（TC_HDR 高位深）：引擎不做块压缩，5.4 实测按 8B/px 常驻；改成压缩格式
+      能省约 7/8，但会丢 HDR 动态范围，属美术决策 -> 只报账，不进默认改写动作；
+    - no_stream（TC_EDITOR_ICON / TC_MAX）：无 mip + 禁用流送，整张恒常驻池外，
+      收益口径是"改回 TC_Default 变可流送、释放常驻"，不是省池。
+    判定用 streaming.format_class（与 opt_texture_set_compression 同一函数），
+    unknown/本地化文本一律不报，宁可漏报也不误判美术格式。
+    """
+    th = ctx["profile"]["uncompressed_texture"]
+    out = []
+    for e in _ensure_pool_entries(ctx):
+        fmt = e.get("format_class") or streaming.format_class(e.get("compression"))
+        if fmt not in ("uncompressed", "no_stream", "high_bpp"):
+            continue
+        mb = float(e.get("runtime_mb") or 0.0)
+        if mb < float(th["min_mb"]):
+            continue
+        sev = "error" if mb >= float(th["error_mb"]) else "warn"
+        if fmt == "no_stream":
+            saving = float(e.get("streaming_release_mb") or 0.0)
+            advice = ("%s 无 mip/禁用流送：整张恒常驻池外 %sMB（不进池但死占显存，"
+                      "VT/钳尺寸救不了）；改回 TC_Default 可变可流送，"
+                      "opt_texture_set_compression 默认只动这类（需重压缩）"
+                      % (e.get("compression"), mb))
+        elif fmt == "high_bpp":
+            saving = float(e.get("compression_savings_mb") or 0.0)
+            advice = ("%s 高位深不降块压缩（实测 %gB/px）：整张 %sMB 死占池/显存；改回 "
+                      "TC_Default 约省 %sMB，但会丢 HDR 动态范围，属美术决策 —— "
+                      "opt_texture_set_compression 默认不动这类，要动需显式 "
+                      "only_uncompressed=False，且改完要重压缩才反映到盘上"
+                      % (e.get("compression"),
+                         float(e.get("runtime_bytes_per_texel") or 8), mb, saving))
+        else:
+            saving = float(e.get("compression_savings_mb") or 0.0)
+            advice = ("未压缩系(%s)按 %gB/px 常驻，改 TC_Default 可省约 %sMB；"
+                      "opt_texture_set_compression 默认只动这类（需重压缩）"
+                      % (e.get("compression"),
+                         float(e.get("runtime_bytes_per_texel") or 4), saving))
+        evidence = {"compression": e.get("compression"), "format_class": fmt,
+                    "runtime_mb": mb, "pool_mb": e.get("pool_mb"),
+                    "permanent_mb": e.get("permanent_mb"), "savings_mb": saving,
+                    "runtime_bytes_per_texel": e.get("runtime_bytes_per_texel"),
+                    "runtime_basis": e.get("runtime_basis"),
+                    "source_width": e.get("source_width"),
+                    "virtual_texture": e.get("virtual_texture")}
+        evidence = {k: v for k, v in evidence.items() if v is not None}
+        out.append({"rule_id": "uncompressed_texture", "severity": sev,
+                    "subject": e["package"], "evidence": evidence,
+                    "threshold": float(th["error_mb"] if sev == "error" else th["min_mb"]),
+                    "advice": advice})
+    return out
+
+
+def _rule_nanite_translucent_conflict(ctx):
+    """编辑器日志里"Nanite 网格 + 半透明材质"的静默降级警告，按指纹归因到资产。
+
+    离线通道（直读 Saved/Logs）。这条专门抓"日志刷屏但没人知道是谁"的场景：
+    5.3 真实工程实测 1.4 万+ 条 Warning 几乎全同源。
+    """
+    th = ctx["profile"]["nanite_translucent"]
+    log_path = logscan._find_log(ctx["project_dir"])
+    lines = logscan._tail_lines(log_path, int(th["log_tail"]))
+    hits = 0
+    assets = {}
+    names = {}
+    samples = []
+    for raw in lines:
+        low = raw.lower()
+        if "nanite" not in low:
+            continue
+        if not any(mark in low for mark in _NANITE_TRANSLUCENT_PHRASES):
+            continue
+        if not any(mark in low for mark in _NANITE_TRANSLUCENT_MARKERS):
+            continue
+        if not _LOG_WARN_LEVEL_RE.search(raw):
+            continue
+        hits += 1
+        found = []
+        for match in attributelog.GAME_RE.findall(raw):
+            pkg = match.split(".", 1)[0]
+            if pkg not in found:
+                found.append(pkg)
+        for pkg in found:
+            assets[pkg] = assets.get(pkg, 0) + 1
+        for name in _LOG_BRACKET_NAME_RE.findall(raw):
+            if not any(ch.isalpha() for ch in name):
+                continue          # 帧计数 "[  12]" 之类纯数字不是资产名
+            if name.lower().startswith("blend"):
+                continue          # 5.4 同行尾还带 [BLEND_Translucent]，是枚举不是资产名
+            names[name] = names.get(name, 0) + 1
+        if len(samples) < 3:
+            samples.append(raw.strip()[:200])
+    if hits < int(th["min_count"]):
+        return []
+    top = sorted(assets.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    top_names = sorted(names.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    if top:
+        attribution = "package_paths"
+    elif top_names:
+        attribution = "asset_names_only"
+    else:
+        attribution = "none"
+    evidence = {"warning_lines": hits, "distinct_assets": len(assets),
+                "assets": [{"package": k, "count": v} for k, v in top],
+                "attribution": attribution,
+                "distinct_names": len(names),
+                "names": [{"name": k, "count": v} for k, v in top_names],
+                "log": os.path.basename(log_path), "samples": samples}
+    evidence = {k: v for k, v in evidence.items() if v not in (None, {}, [])}
+    if attribution == "package_paths":
+        subject = "%s (%d assets)" % (evidence.get("log", "editor log"), len(assets))
+    elif attribution == "asset_names_only":
+        subject = ("%s (%d 条冲突；UE 该行只带资产名不带 /Game 路径，"
+                   "按名归因见 evidence.names)" % (evidence.get("log", "editor log"), hits))
+    else:
+        subject = "%s (%d 条冲突；日志未给出可归因的资产名)" % (
+            evidence.get("log", "editor log"), hits)
+    return [{"rule_id": "nanite_translucent_conflict", "severity": "error",
+             "subject": subject, "evidence": evidence, "threshold": int(th["min_count"]),
+             "advice": "Nanite 不支持 Translucent 系混合模式：网格会静默降级并刷日志。"
+                       "用 scan_nanite_candidates 定位，再 fix_nanite_translucent "
+                       "先 dry-run、双钥关闭（关 Nanite 是降级不是损坏）"}]
+
+
+def _rule_drawcall_batching(ctx):
+    """重复同网格的散装 StaticMeshActor = HISM/ISM 合批机会（drawcall 白给）。
+
+    数据来自 list_level_actors(compose=True) 的 composition，口径与该工具一致；
+    composition 覆盖整关卡（不受 actors limit 截断），故这里判的是完整场景。
+    """
+    th = ctx["profile"]["batching"]
+    comp = _ensure_composition(ctx)
+    if not isinstance(comp, dict):
+        return []
+    opps = comp.get("instancing_opportunities") or []
+    if not opps:
+        return []
+    min_group = int(th["min_group_actors"])
+    opps = [o for o in opps if int(o.get("actors") or 0) >= min_group]
+    if not opps:
+        return []
+    collapsible = sum(int(o["actors"]) - 1 for o in opps)
+    if collapsible < int(th["min_collapsible"]):
+        return []
+    share = float(comp.get("instanced_share_pct") or 0.0)
+    sev = "error" if share <= 0.0 else "warn"
+    evidence = {"groups": len(opps), "collapsible_actors": collapsible,
+                "instanced_share_pct": share,
+                "plain_staticmesh_actors": comp.get("plain_staticmesh_actors"),
+                "world_total_actors": comp.get("world_total_actors"),
+                "top_groups": opps[:10], "min_group_actors": min_group}
+    return [{"rule_id": "drawcall_batching", "severity": sev,
+             "subject": "level (%d groups)" % len(opps), "evidence": evidence,
+             "threshold": int(th["min_collapsible"]),
+             "advice": "同网格重复放置未实例化：analyze_instancing 出合并方案（路线 B "
+                       "只出计划不动场景）；真要折叠成 HISM 须先提交 VCS/另存关卡副本"}]
+
+
 def apply_runtime_verdicts(findings, metrics):
     """bridge 在线时用运行时度量给 asset_size_top 消误报：假大(disk_only_bloat)降档 error->warn。
 
@@ -423,6 +746,21 @@ RULES = (
     {"id": "texture_size", "cfg": "texture_px", "channel": "bridge", "doc": "纹理尺寸超阈值（按 sample_size 抽样度量最大资产）", "run": _rule_texture_size},
     {"id": "mesh_tri", "cfg": "mesh_tri", "channel": "bridge", "doc": "网格 LOD0 三角数超阈值/单 LOD 高模（附材质槽/碰撞维度）", "run": _rule_mesh_tri},
     {"id": "scene_light_dup", "cfg": "scene_light_dup", "channel": "bridge", "doc": "DirectionalLight/SkyLight 重复放置", "run": _rule_scene_light_dup},
+    {"id": "texture_streaming_overflow", "cfg": "texture_streaming", "channel": "bridge",
+     "doc": "聚合流送池需求 vs 工程 ini 的 PoolSize（总账，不逐张）",
+     "run": _rule_texture_streaming_overflow},
+    {"id": "oversized_mip", "cfg": "mip_clamp", "channel": "bridge",
+     "doc": "未钳 MaxSize 的超大纹理：整条 mip 链进池，批量钳收益/成本比最高",
+     "run": _rule_oversized_mip},
+    {"id": "uncompressed_texture", "cfg": "uncompressed_texture", "channel": "bridge",
+     "doc": "非工程运行时压缩格式：未压缩系 4B/px、TC_HDR 高位深 8B/px 吃池；EditorIcon 系无 mip/禁流送恒常驻",
+     "run": _rule_uncompressed_texture},
+    {"id": "nanite_translucent_conflict", "cfg": "nanite_translucent", "channel": "offline",
+     "doc": "编辑器日志里 Nanite+半透明材质的静默降级警告（按指纹归因资产）",
+     "run": _rule_nanite_translucent_conflict},
+    {"id": "drawcall_batching", "cfg": "batching", "channel": "bridge",
+     "doc": "重复同网格散装 StaticMeshActor 的 HISM/ISM 合批机会",
+     "run": _rule_drawcall_batching},
 )
 
 
@@ -432,6 +770,10 @@ _EFFORT_BY_RULE = {
     "asset_size_top": "mid", "texture_size": "mid", "mesh_tri": "high",
     "wps_external_actors": "mid", "scene_light_dup": "low",
     "cook_drop": "high", "cook_empty_maps": "high",
+    # v1.5 优化族：纯属性改动(钳/VT/压缩)=low，改网格=mid，改关卡 Actor=high
+    "oversized_mip": "low", "uncompressed_texture": "low",
+    "texture_streaming_overflow": "mid", "nanite_translucent_conflict": "mid",
+    "drawcall_batching": "high",
 }
 
 
@@ -473,6 +815,32 @@ def _roi_of(f):
                 extra += max(0, int(v) - 1)
         unit, benefit = "extra_light_passes", extra
         rationale = "删重复方向光/天光，成本低"
+    elif rid == "oversized_mip":
+        unit, benefit = "memory_or_disk_mb", ev.get("savings_mb")
+        rationale = "opt_texture_clamp_max_size 批量钳 MaxSize：纯属性改动，收益=省下的池/显存"
+    elif rid == "uncompressed_texture":
+        fmt_name = ev.get("format_class")
+        # 与 oversized_mip 的钳尺寸收益有重叠，故按本分列，不并入 MB 总计
+        if fmt_name == "no_stream":
+            unit, benefit = "permanent_release_mb", ev.get("savings_mb")
+            rationale = ("无 mip/禁流送系：改 TC_Default 释放的是常驻显存而非池；"
+                         "与钳尺寸收益重叠，不叠加计入总计")
+        elif fmt_name == "high_bpp":
+            unit, benefit = "pool_high_bpp_mb", ev.get("savings_mb")
+            rationale = ("高位深(TC_HDR)按 8B/px 常驻：改块压缩约省 7/8，但会丢 HDR 动态范围，"
+                         "属美术决策(默认工具不代改)；与钳尺寸收益重叠，不叠加计入总计")
+        else:
+            unit, benefit = "pool_uncompressed_mb", ev.get("savings_mb")
+            rationale = "改压缩格式(需重压缩)可省约 3/4；与钳尺寸收益重叠，不叠加计入总计"
+    elif rid == "texture_streaming_overflow":
+        unit, benefit = "pool_overflow_mb", ev.get("overflow_mb")
+        rationale = "总账：降需求(钳/VT/压缩)才是正解，单加大 PoolSize 只是掩盖"
+    elif rid == "nanite_translucent_conflict":
+        unit, benefit = "warning_lines", ev.get("warning_lines")
+        rationale = "关 Nanite 消静默降级与日志刷屏；收益是正确性/可观测性，不是体量"
+    elif rid == "drawcall_batching":
+        unit, benefit = "collapsible_actors", ev.get("collapsible_actors")
+        rationale = "HISM 合批要动关卡 Actor，风险最高（路线 B 先只出方案），不计入体量收益"
     elif rid in ("cook_drop", "cook_empty_maps"):
         rationale = "cook 正确性问题（内容被丢弃/地图没烘进包），须修管线，优先但不是体量收益"
     else:

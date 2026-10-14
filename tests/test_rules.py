@@ -114,10 +114,13 @@ def test_server_tool_wiring(tmp_path):
         bad = server.get_perf_report(target="atari")
         assert bad["ok"] is False and bad["error"]["code"] == envelope.Code.RUNTIME_ERROR
         lst = server.list_perf_rules()
-        assert lst["ok"] and lst["result"]["total"] == 7
+        assert lst["ok"] and lst["result"]["total"] == 12
         ids = {r["id"] for r in lst["result"]["rules"]}
         assert ids == {"asset_size_top", "cook_drop", "wps_external_actors",
-                       "texture_size", "mesh_tri", "scene_light_dup", "cook_empty_maps"}
+                       "texture_size", "mesh_tri", "scene_light_dup", "cook_empty_maps",
+                       # v1.5 优化族（纹理池/Nanite/合批）
+                       "texture_streaming_overflow", "oversized_mip", "uncompressed_texture",
+                       "nanite_translucent_conflict", "drawcall_batching"}
         size_rule = [r for r in lst["result"]["rules"] if r["id"] == "asset_size_top"][0]
         assert size_rule["thresholds"]["warn"] == 0.001  # 工程 TOML 生效
     finally:
