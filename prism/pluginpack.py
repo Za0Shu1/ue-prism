@@ -31,6 +31,11 @@ ENGINE_MODULES = [
     "domain/assets.py",
     "domain/metrics.py",
     "domain/migrate.py",
+    "streaming.py",
+    "domain/optutil.py",
+    "domain/opt_texture.py",
+    "domain/opt_nanite.py",
+    "domain/opt_instancing.py",
 ]
 
 # 绝不进插件：MCP 协议层 / 命令行 / 离线分析（留在 pip 侧）。用于校验装配产物。
