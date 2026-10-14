@@ -9,7 +9,7 @@
 |---|---|---|---|
 | **L0 离线套件** | 无引擎，Python>=3.10 | `python -m pytest` | 协议/信封/总线/规则纯逻辑/降级结构契约。改任何层必跑 |
 | **L1 桥冒烟** | 编辑器在线 | `python scripts/verify_connection.py`；`python scripts/bus_call.py <bus_dir> ping` | 心跳、往返、UE 版本 |
-| **L2 校准夹具** | 任意 UE5 工程装好桥插件（编辑器在线） | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 56 项校验（含写路径 rename/move/copy 往返 + v1.5 优化族 28 项属性读写往返，均自还原，见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
+| **L2 校准夹具** | 任意 UE5 工程装好桥插件（编辑器在线） | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 59 项校验（含写路径 rename/move/copy 往返 + v1.5 优化族 28 项属性读写往返，均自还原，见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
 | **L2/L3 cook·package 全链路** | 任意 UE5 工程 + 本机 UE（**编辑器须关闭**） | `python scripts/verify_cook_chain.py --project <P> [--mode cook\|package]` | cook_package 真实全链路：dry-run 组装→双钥真执行→轮询状态→校验产物落盘→日志错误归因。`--mode cook` 校验 cooked `.umap`（9 项，L2）；`--mode package` 真编 `-build -cook -stage -pak -archive` 并校验归档内 `.exe`/`.pak`（10 项，L3——首编耗时长）。因需编辑器关闭、且不经过桥，与 run_fixture 互斥、单独成脚本 |
 | **L3 真实工程抽样** | 客户的真实大工程 | 人工驱动 MCP 工具 + 抽检 | 假阳性率、大闭包耗时、阈值手感 |
 
@@ -90,7 +90,7 @@
   跨版本各跑一次即得 **VT / MaxSize / Nanite 三处属性签名 + HISM 探针**的兼容矩阵。
 - ✅ 5.4.4 已真机验收 **50/50 全 PASS**（2026-10-10，夹具 errors=0，矩阵/日志留本地 `_internal/`）。
   ⚠️ 5.3 尚未带上这 28 项复跑，跨版本矩阵仍欠 5.3 一行。
-- ✅ 2026-10-14 在真实大工程（9242 资产 / 14.4GB，3163 纹理 + 1898 网格）复跑 **53/53 全 PASS**，
+- ✅ 2026-10-14 在真实大工程（9242 资产 / 14.4GB，3163 纹理 + 1898 网格）复跑 **59/59 全 PASS**，
   且**同一编辑器会话连跑两轮**都绿。真实工程照出两处只在真机才会暴露的缺陷：
   注册表**多导出包按导出重复计数**（一个 HLOD 包占 76 格、400 格纹理窗口里 125 项"读不到尺寸"、
   池需求只报得出真实值的一小截——160 格窗口仅量到 35 张）与**单包引用查询失败被误判成整场 API 漂移**（残留内存态复制靶让同会话第二轮夹具必崩）。
@@ -99,8 +99,8 @@
 
 ## v1.5 优化族的真机验收（5.4 已跑，5.3 待补）
 
-本轮在有编辑器的机器上完成：L0 355 用例（354 passed / 1 skipped）全绿，5.4.4 夹具
-**53/53 真机全 PASS**。合并/发版前仍须在 UE 5.3（以及 5.5/5.8 等）各跑一次 `run_fixture`
+本轮在有编辑器的机器上完成：L0 394 用例（393 passed / 1 skipped）全绿，5.4.4 夹具
+**59/59 真机全 PASS**。合并/发版前仍须在 UE 5.3（以及 5.5/5.8 等）各跑一次 `run_fixture`
 并归档 `matrix.json`：
 
 ```bash
@@ -108,7 +108,7 @@ python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor
     --matrix _internal/matrix-<版本>-v15.json
 ```
 
-预期 53/53 全 PASS。红了不要放宽断言，按证据补候选签名：
+预期 59/59 全 PASS。红了不要放宽断言，按证据补候选签名：
 - `nanite.force_write_honest` → 看 `matrix.opt_nanite.nanite_api` 命中哪条（5.0/5.1
   `supports_nanite` / 5.3 `nanite_settings.enabled` / 5.4+ `nanite_enabled`）；没命中就是真
   漂移，往 `opt_nanite.NANITE_FLAT_PROPS` 补候选。
@@ -149,7 +149,7 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 
 | 引擎 | L2 夹具 run_fixture | cook 全链路 | package 全链路 |
 |---|---|---|---|
-| UE 5.4.4 | **53/53**（2026-10-14 真实大工程复跑、同会话两轮；含 v1.5 优化族 28 项 + HDR 高位深/材质实例/压缩同名 no_op 靶 + 一包一条/冲突拒写 3 项不变量；errors=0。2026-10-10 首轮 50/50） | 9/9（695 包/0 error） | Development + Shipping 各 10/10 |
+| UE 5.4.4 | **59/59**（2026-10-14 真实大工程复跑、同会话两轮；含 v1.5 优化族 28 项 + HDR 高位深/材质实例/压缩同名 no_op 靶 + 一包一条/冲突拒写 3 项不变量；errors=0。2026-10-10 首轮 50/50） | 9/9（695 包/0 error） | Development + Shipping 各 10/10 |
 | UE 5.3.2 | 22/22（v1.5 新增 28 项**待复跑**，含 HDR 高位深/材质实例/压缩同名 no_op 靶） | 9/9 | Development + Shipping 各 10/10 |
 
 - 域层跨版本靠多签名 `try` 兜底，`tried` 实测两版一致：`used_by`/`get_dependencies`=`name+opts`；纹理尺寸无直读 API → `blueprint_get_memory_size` + 源盘反推；5.3/5.4 `EditorAssetLibrary.move_asset` 皆 `AttributeMissing` → 走 `rename_asset` 兜底。
@@ -158,7 +158,7 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 - 5.4.4 实测签名命中（本轮夹具矩阵）：Nanite 走 `nanite_settings.enabled`；MaxSize 走
   `set_editor_property(max_texture_size)`；材质混合模式走 `get_blend_mode()`；`used_with_nanite`
   材质本体直读、材质实例必须 `get_base_material()>used_with_nanite`；纹理尺寸无直读 API（Cube 全靠源盘反推）。
-- 本机覆盖状态：**5.4.4 夹具 53/53 + cook 9/9 + package Dev/Shipping 各 10/10**；
+- 本机覆盖状态：**5.4.4 夹具 59/59 + cook 9/9 + package Dev/Shipping 各 10/10**；
   5.3.2 仍是旧 22 项全绿，**v1.5 优化族与 HDR 台账未在 5.3 复跑**。更多版本（5.5/5.8 等）在其他机器补跑。
 
 ## 工具覆盖矩阵（当前 30 个 MCP 工具）
@@ -186,7 +186,7 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 | `scan_nanite_candidates`（只读） | test_opt_nanite（27 用例：分类六态 + 降级键常驻 + `base_material()` 三态解包 + 材质清单非 null） | nanite.target_blocked_before_write / conflict_detected / material_usage_readable_via_base_material / material_instance_usage_not_null | 真实高模候选阈值手感（`min_triangles`）；真实工程某网格 5 材质经 `get_base_material()` 全部读到确定值 |
 | `opt_mesh_set_nanite` / `fix_nanite_translucent`（写·双钥） | test_opt_nanite（三条版本签名钉死 + 写不进必须 failed + 半透明拦截 + blend_mode 读不到保守跳过） | nanite.skip_translucent_blocks / force_write_honest / fix_write_honest / self_restored | 材质 `bUsedWithNanite` 只报不改（动材质另议）；真实工程警告回落抽检 |
 | `analyze_instancing`（只读，D2 路线 B） | test_opt_instancing（分组/阻断/drawcall 前后纯逻辑） | compose.instancing_groups | 折叠动作本身交给 `opt_collapse_hism`；真实工程关卡仍需人工确认 blockers |
-| `opt_collapse_hism`（写·双钥，路线 A） | test_opt_hism（14 用例：拒收 blockers/材质覆盖/over_limit + 双钥先于引擎 + 假引擎折叠→清单→回滚闭环，其中位置回写真值逼出过一条 manifest 丢坐标缺陷） | hism.plan_does_not_touch_scene / hism.collapse_needs_double_key / hism.bad_mode_is_rejected（`--hism-roundtrip` 另跑 collapse_reduces_actors + restore_round_trips） | 清单只保类/网格/变换/标签/子关卡：碰撞、光照绑定、蓝图绑定不承诺复原；对象名由引擎重分配（身份靠 label） |
+| `opt_collapse_hism`（写·双钥，路线 A） | test_opt_hism（25 用例：拒收 blockers/材质覆盖/over_limit + 双钥先于引注 + 假引注折叠→清单→回滚闭环 + 5.4 路线钉死（裸 Actor + `new_object` HISM 根组件、专用类/旧组件名兜底/什么都没绑的诚实失败）+ 实例写不满/变换读不到时整组退回不销毁 + 回滚网格只认回读） | hism.plan_does_not_touch_scene / collapse_needs_double_key / bad_mode_is_rejected；`--hism-roundtrip` 另跑 collapse_reduces_actors（含容器被认成已实例化）+ restore_round_trips + restore_puts_meshes_back | 清单只保类/网格/变换/标签/子关卡：碰撞、光照绑定、蓝图绑定不承诺复原；对象名由引注重分配（身份靠 label） |
 | 基建（bus/envelope/cli/pluginpack/resolve） | test_bus / test_buscall / test_cli / test_pluginpack / test_resolve | - | - |
 
 ## 新功能测试纪律
@@ -233,3 +233,65 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
    口径本身已诚实（`runtime_ledger` 实测优先 + `runtime_basis` 标注），但**读数前先看 basis**：
    要准确值就让纹理先进编辑器内存（打开引用它的关卡/资产），或按 `est x ratio` 当下限读。
    后续可加"Cube 源边长"真机靶改进反推（记 TODO，未擅自动口径）。
+
+## HISM 折叠的 5.4 真机口径（v1.5 PR-5，本轮实测）
+
+`--hism-roundtrip` 会把 CalibMap 真折叠成一个 HISM 再按清单回滚（写关卡两次）。
+跑法：
+
+```bash
+python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe> \
+    --hism-roundtrip                      # 重建关卡真值 + 59 项校验
+python scripts/calib_fixture/checks.py <bus_dir> <project_dir> --hism-roundtrip  # 只跑校验
+PRISM_FIXTURE_RESET_MAP=1 ... --skip-assets  # 地图只数量不对时强制重建
+```
+
+真机事实（全部用只读探针 + 命名表核对得出，不是推测）：
+
+- **UE 5.4.4 的 Python 里根本没有 HISM/ISM 的 Actor 类**：`dir(unreal)` 无
+  `HierarchicalStaticMeshActor`/`InstancedStaticMeshActor`，476 个
+  `UnrealEditor-*.dll` 的名字表（ASCII + UTF-16）零命中，引注源码也无此类。
+  引注自己的实例化工具（`MeshMergeUtilities`）走的就是"裸 AActor + 实例组件"。
+- 组件真名是 **`HierarchicalInstancedStaticMeshComponent`**，不是想当当的
+  `HierarchicalStaticMeshComponent`；照错名找组件会永远 miss（旧名保留为兜底候选）。
+- `Actor.add_component_by_class` 是 `ScriptNoExport/BlueprintInternalUseOnly`，不进脚本绑定。
+  可行入口：`unreal.new_object(cls, actor, name)` 造组件 →
+  `actor.set_editor_property("root_component", comp)` 挂上去。
+- `add_instances(transforms)` 单参数直接 `TypeError`（绑定的是 `(transforms, bWorldSpace)`）；
+  双参能写但**返回空列表**，写入数只能取前后 `get_instance_count()` 的差。
+- **持久化已验证**：这样造出的容器存盘→重载地图后 Actor、组件、实例数、网格全在。
+  夹具里的它是硬依据：折叠后存盘的 `.umap` 名字表里只剩
+  `HierarchicalInstancedStaticMeshComponent`/`PrismHISMComponent`/`Cube_HISM`，`StaticMeshActor` 零命中。
+- 属性保真可读到的有限：`mobility` 抄得动，`b_cast_shadow`/`collision_profile_name`
+  读不到就记 `fidelity_skipped:...`，不假装一致。
+- 材质覆盖判定连踩四个坑（`get_materials()` 长度、网格槽声明为 None、
+  覆盖数组被预填网格自身材质、引注默认材质两条路径不同），最终口径：
+  **候选与网格自身材质按路径比对**，同包裹不同导出名算同一个、两侧都是引注默认材质算同一个，
+  判不准走 `material_override_unknown` 记账放行，不得拒收整组。
+
+本轮真机照出的两个缺陷（离线用例反馈不了，因为假引注按同一个错误假设写）：
+
+- **回滚丢网格**：`_restore` 把网格往 `AActor` 上写（真机既没 `actor.static_mesh` 属性也没
+  `set_static_mesh` 方法），只要没抛异常就 `break` 当成功——数量对了，地图里却是 1500 个空壳。
+  现在写进 `StaticMeshComponent` 并**只认 `_mesh_probe` 回读**，落不到位置记
+  `restore_mesh_missing` 并让 `success=False`，`failed` 明细封顶 20 条 + `failed_truncated`。
+  对应真值校验：`hism.restore_puts_meshes_back`。
+- **折完不自认**：容器是裸 Actor，`analyze_instancing` 原先按 Actor 类名判实例化，
+  会把它漏成"无网格 Actor"，合批账数不到自己头上。现在看组件：
+  `root_component` 或任一 `ActorComponent` 命中 ISM/HISM/Foliage → `excluded_instanced_actors`。
+
+## 三本账（别把它们加在一起）
+
+| 账 | 口径 | 谁会动 | 本轮真实工程数字 |
+|---|---|---|---|
+| 源盘 `.uasset/.umap` | `scan_folder_assets` / 磁盘文件清单 | 只有重存源资产才动；钳 MaxSize 不改源图 | 9243 文件 14733.3 → 14729.3 MB（**−4.0 MB**，当天重存 1066 个资产文件（含 1 个关卡）） |
+| 运行时流送池 | `scan_texture_streaming` 的 `pool_demand_mb`（同一 399 大容量窗口） | 钳尺寸/开 VT/改压缩的收益都记这里 | 6131.8 → 1319.7 MB（**−4812.1 MB / −78.5%**） |
+| cooked 产物 | 真重编后的 `.uasset`（`cook_package`） | 钳尺寸要重压缩才落到盘 | 本轮未重编，不报数字 |
+
+- 钳 MaxSize 的收益写在**池与 cooked**，不写在源盘：源图和它的全部 mip 仍然在 `.uasset` 里。
+  所以"改了上千张贴图源盘只降了几 MB"是预期行为，不是效果没生效。
+- **VT 与钳尺寸不可相加**：先钳尺寸再看 VT，钳完后候选集的 `pool_release_mb` 会归零（本轮即如此：
+  3116 个候选在钳到 1024 后可释放 0.0 MB，故未批量开 VT）。
+- 工程 ini 没写 `r.Streaming.PoolSize` 时 `verdict=unknown`：建议人工设一个上限，否则溢不溢根本无从判定。
+- 重量口（循环验收用）：`scan_texture_streaming` 的 `probe_source=True` 会把资产装进内存，
+  **批量写完不要立刻重测**（引用冷热态交错时会把编辑器拖崩）；要快就用 `probe_source=False`。

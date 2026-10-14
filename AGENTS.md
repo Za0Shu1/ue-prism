@@ -29,9 +29,9 @@
 
 ## 测试（规范全文见 docs/TESTING.md）
 四层体系，按需执行：
-- **L0 离线**：`python -m pytest`（33 个文件 / 382 用例：总线、信封、domain 分发、规则纯逻辑、池估算模型、双钥写契约、降级结构契约）。改动上述任何一层后必须跑。
+- **L0 离线**：`python -m pytest`（33 个文件 / 394 用例：总线、信封、domain 分发、规则纯逻辑、池估算模型、双钥写契约、降级结构契约）。改动上述任何一层后必须跑。
 - **L1 桥冒烟**：编辑器在线时 `python scripts/verify_connection.py` 或 `scripts/bus_call.py <bus_dir> ping`。
-- **L2 校准夹具**：`python scripts/calib_fixture/run_fixture.py --project <工程> --editor <UnrealEditor.exe>` 一键在任意 UE5 工程/版本重建已知真值（真大/假大/Cube/孤儿/合批/禁流送格式/Nanite+半透明/HDR 高位深/材质实例/压缩同名 no_op 靶）并跑 53 项真值校验，落 `matrix.json`（ue_version / API tried 命中 / 计时）——跨版本各跑一次即得兼容矩阵。
+- **L2 校准夹具**：`python scripts/calib_fixture/run_fixture.py --project <工程> --editor <UnrealEditor.exe>` 一键在任意 UE5 工程/版本重建已知真值（真大/假大/Cube/孤儿/合批与 HISM 折叠靶/禁流送格式/Nanite+半透明/HDR 高位深/材质实例/压缩同名 no_op 靶）并跑 59 项真值校验（`--hism-roundtrip` 含真折叠↔回滚往返），落 `matrix.json`（ue_version / API tried 命中 / 计时）——跨版本各跑一次即得兼容矩阵。
 - **L3 真实工程抽检**：大工程（用户提供）验证假阳性率、大闭包耗时、阈值手感。
 - 不要为了让测试通过而删除 domain 里的 `unreal` 分支——无引擎时靠惰性 import 降级返回。
 - domain 内 sleep/轮询等待编辑器状态**无效**（总线在主线程 tick 内同步处理）；冷热态敏感的度量要固化字段语义（如 `source_width`/`effective_width`），不随编辑器状态漂移。
