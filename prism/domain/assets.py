@@ -929,6 +929,8 @@ def scan_orphan_assets(folder="/Game", limit=2000, offset=0, max_orphans=200, re
         "total_scanned": 0, "total_available": 0,
         "truncated": False, "cap": limit, "offset": offset,
         "orphans": [], "orphan_count": 0,
+        "ref_query_failed": [], "ref_query_failed_count": 0,
+        "ref_query_failed_truncated": False,
         "total_reclaimable_bytes": 0, "total_reclaimable_mb": 0.0,
         "by_dir": {}, "by_dir_truncated": False,
         "excluded": {}, "confidence_counts": {"high": 0, "suspect": 0},
@@ -970,6 +972,8 @@ def scan_orphan_assets(folder="/Game", limit=2000, offset=0, max_orphans=200, re
     excluded_counts = {}
     conf_counts = {"high": 0, "suspect": 0}
     by_dir = {}
+    attempted = 0
+    ref_failed = []
 
     for pkg, d in window:
         cls = _class_name(unreal, d)
@@ -977,10 +981,15 @@ def scan_orphan_assets(folder="/Game", limit=2000, offset=0, max_orphans=200, re
         if ex:
             excluded_counts[ex] = excluded_counts.get(ex, 0) + 1
             continue
+        attempted += 1
         refs, sig = _registry_graph(ar, unreal, "get_referencers", pkg, False)
         if sig is None:
-            return envelope.make_err(envelope.Code.UE_API_MISMATCH,
-                                     "get_referencers: no candidate signature matched (5.0-5.8 drift?)")
+            # 单个包查不动（内存态复制靶、注册表陈旧项）不得把整场扫描判成引擎 API 漂移：
+            # 记一条 unresolved 继续扫，判"引用者未知"=不当孤儿（宁漏不误删）。
+            # 5.4 真实工程实证：夹具的 in-memory 复制靶让 folder=/Game/PrismCalib/_pwtmp
+            # 首包就抛，旧代码直接 return UE_API_MISMATCH，把整份孤儿清单带走。
+            ref_failed.append(pkg)
+            continue
         if len(refs) > 0:
             continue  # 被任何资产引用 -> 非孤儿
         has_pid = _has_primary_asset_id(unreal, d)
@@ -1002,6 +1011,20 @@ def scan_orphan_assets(folder="/Game", limit=2000, offset=0, max_orphans=200, re
         slot = by_dir.setdefault(parent, {"count": 0, "size_bytes": 0})
         slot["count"] += 1
         slot["size_bytes"] += size
+
+    result["ref_query_failed_count"] = len(ref_failed)
+    result["ref_query_failed"] = ref_failed[:20]
+    result["ref_query_failed_truncated"] = len(ref_failed) > 20
+    if ref_failed and attempted and len(ref_failed) >= attempted:
+        # 整窗都查不动才是真签名漂移，照旧诚实报错（绝不静默出"看似干净"的清单）
+        return envelope.make_err(
+            envelope.Code.UE_API_MISMATCH,
+            "get_referencers: no candidate signature matched (5.0-5.8 drift?) — "
+            "本窗 %d 个包全部查询失败" % attempted)
+    if ref_failed:
+        result["note"] = result.get("note", "") + (
+            " 本窗 %d/%d 个包 get_referencers 查询失败(引用者未知，已按非孤儿保守排除，"
+            "清单见 ref_query_failed)。" % (len(ref_failed), attempted))
 
     total_reclaim = 0
     for o in orphans_all:
