@@ -7,6 +7,19 @@ import pytest
 from prism import pluginpack as pp
 
 
+def test_engine_modules_cover_every_domain_file_on_disk():
+    """防漂移：domain 新增模块必须进 ENGINE_MODULES（否则插件拷贝漏装）。
+
+    真机踩点：opt_collapse_hism 落地后 plugin-install 仍只装 19 个文件，编辑器里
+    压根没有这个函数——清单靠手抄必漏，这里用磁盘事实钉住。
+    """
+    domain_dir = os.path.join(os.path.dirname(pp.__file__), "domain")
+    on_disk = {"domain/" + n for n in os.listdir(domain_dir) if n.endswith(".py")}
+    on_disk -= {"domain/__init__.py"}
+    listed = {m for m in pp.ENGINE_MODULES if m.startswith("domain/")}
+    assert on_disk <= listed, sorted(on_disk - listed)
+
+
 def test_closure_modules_exist_in_installed_package():
     root = pp.prism_root()
     for rel in pp.ENGINE_MODULES:
