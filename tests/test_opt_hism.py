@@ -136,7 +136,24 @@ class _Lvl(object):
         return "PersistentLevel"
 
 
+class _Slot(object):
+    def __init__(self, mat):
+        self.material_interface = mat
+
+
 class _MeshObj(object):
+    """网格替身：5.4 实证材质槽来自 static_materials[i].material_interface。"""
+
+    def __init__(self, package, default_mat=None):
+        self.package = package
+        self.default_mat = default_mat or _MeshMat("/Engine/EngineMaterials/DefaultMaterial")
+        self.static_materials = [_Slot(self.default_mat)]
+
+    def get_path_name(self):
+        return self.package + "." + self.package.rsplit("/", 1)[-1]
+
+
+class _MeshMat(object):
     def __init__(self, package):
         self.package = package
 
@@ -145,15 +162,25 @@ class _MeshObj(object):
 
 
 class StaticMeshComponent(object):
-    def __init__(self, mesh, overrides=0):
+    """组件替身：get_material(i) 返回"解析后"的材质（覆盖优先，否则网格默认）。"""
+
+    def __init__(self, mesh, override=None):
         self.static_mesh = mesh
-        self._overrides = overrides
+        self._override = override
 
     def get_class(self):
         return _Cls("StaticMeshComponent")
 
+    def get_num_materials(self):
+        return 1
+
+    def get_material(self, index):
+        if self._override is not None:
+            return self._override
+        return self.static_mesh.default_mat if self.static_mesh else None
+
     def get_materials(self):
-        return [None] * self._overrides
+        return [self.get_material(0)]
 
 
 class HierarchicalStaticMeshComponent(object):
@@ -396,9 +423,9 @@ def _make_unreal(world, tmp_path):
 def _seed_world(cube=7, sphere=3, overrides=()):
     world = _World()
     for i in range(cube):
+        override = _MeshMat("/Game/Mats/M_Different") if "Cube_%d" % i in overrides else None
         world.actors.append(_Actor(world, "Cube_%d" % i, "StaticMeshActor",
-                                   [StaticMeshComponent(_MeshObj(CUBE),
-                                                        1 if "Cube_%d" % i in overrides else 0)],
+                                   [StaticMeshComponent(_MeshObj(CUBE), override)],
                                    (float(i), 0.0, 0.0)))
     for i in range(sphere):
         world.actors.append(_Actor(world, "Sph_%d" % i, "StaticMeshActor",
@@ -484,6 +511,31 @@ def test_restore_rejects_a_broken_manifest(fake_engine, tmp_path):
     res = oh.opt_collapse_hism(mode="restore", manifest=str(bad),
                                dry_run=False, confirm=True)["result"]
     assert res["executed"] is False and "清单" in res["note"]
+
+
+def test_real_override_blocks_collapse_but_default_does_not(monkeypatch, tmp_path):
+    """覆盖判定必须逐槽比对默认材质：数 get_materials() 长度会误拒整组（5.4 真机踩点）。"""
+    clean = _seed_world(cube=6)
+    monkeypatch.setitem(sys.modules, "unreal", _make_unreal(clean, tmp_path))
+    res = oh.opt_collapse_hism(min_count=5, limit=5)["result"]
+    assert res["total"] == 1 and res["material_override_refused"] == 0
+    assert res["groups"][0]["material_overrides"] == 0
+
+    dirty = _seed_world(cube=6, overrides={"Cube_2"})
+    monkeypatch.setitem(sys.modules, "unreal", _make_unreal(dirty, tmp_path))
+    res2 = oh.opt_collapse_hism(min_count=5, limit=5)["result"]
+    assert res2["total"] == 0 and res2["material_override_refused"] == 1
+    assert res2["refused_groups"][0]["reason"] == "material_overrides"
+    assert res2["refused_groups"][0]["material_overrides"] == 1
+
+    unreadable = _seed_world(cube=6)
+    for actor in unreadable.actors:
+        if actor.get_actor_label().startswith("Cube"):
+            actor._comps[0].static_mesh.static_materials = []
+    monkeypatch.setitem(sys.modules, "unreal", _make_unreal(unreadable, tmp_path))
+    res3 = oh.opt_collapse_hism(min_count=5, limit=5)["result"]
+    assert res3["total"] == 1, "默认槽读不到=未知，保守放行但要记账"
+    assert res3["material_override_unknown"] == 6
 
 
 def test_collapse_refuses_when_hism_component_is_unreachable(monkeypatch, tmp_path):

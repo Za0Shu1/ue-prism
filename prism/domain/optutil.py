@@ -336,7 +336,7 @@ def _section_materials(obj, tried):
     counter = getattr(obj, "get_num_sections", None)
     if getter is None or counter is None:
         tried.append({"sig": "get_material(i)", "err": "AttributeMissing"})
-        return [], None
+        return [], None, None
     try:
         sections = int(counter(0) or 0)
     except Exception as exc:
@@ -390,7 +390,8 @@ def mesh_materials(unreal, obj):
     if mats:
         return mats, hit2, tried, False
     # 有 section 却一个材质都取不到 = 判读不了（保守），不是"没有材质"
-    return [], None, tried, sections > 0
+    # sections 可能是 None（该版本连 get_material 都没有），别拿 None 去比大小
+    return [], None, tried, bool(sections) and sections > 0
 
 
 def base_material(unreal, material):

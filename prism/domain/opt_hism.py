@@ -42,6 +42,7 @@ def _base(mode, dry_run):
             "groups": [], "refused_groups": [], "hism_created": 0,
             "actors_instanced": 0, "actors_destroyed": 0,
             "blockers_refused": 0, "material_override_refused": 0,
+            "material_override_unknown": 0,
             "drawcalls_before": 0, "drawcalls_after": 0,
             "universe": 0, "scanned": 0, "total": 0, "truncated": False,
             "cap": 0, "note": None, "tried": [], "level_saved": False,
@@ -220,7 +221,71 @@ def _to_list(vec):
     return out
 
 
-def _actor_record(unreal, actor):
+def _mesh_component(unreal, actor):
+    for call in (lambda: actor.get_component_by_class(unreal.StaticMeshComponent),
+                 lambda: (actor.get_components_by_class(unreal.StaticMeshComponent) or [None])[0]):
+        try:
+            got = call()
+        except Exception:
+            continue
+        if got is not None:
+            return got
+    return None
+
+
+def _override_count(unreal, actor, tried):
+    """材质覆盖数：逐槽比对"组件解析后的材质"与"网格默认槽材质"。
+
+    5.4 真机教训：`StaticMeshComponent.get_materials()` 返回的是解析后的槽材质（含网格
+    默认值），拿它的长度当"覆盖数"会把没覆盖的 Actor 全判成有覆盖，整组被闸门拒收。
+    返回 None 表示判不准（默认槽读不到）——上层按"未知"记账并放行，不假装成 0。
+    """
+    comp = _mesh_component(unreal, actor)
+    if comp is None:
+        return None
+    mesh = _u.prop(comp, "static_mesh")
+    if mesh is None:
+        return None
+    defaults, api, _sub, unreadable = _u.mesh_materials(unreal, mesh)
+    if unreadable or not defaults:
+        tried.append("override_probe:defaults_unreadable")
+        return None
+    paths = []
+    for mat in defaults:
+        try:
+            paths.append(str(mat.get_path_name()))
+        except Exception:
+            paths.append(None)
+    total = None
+    for call in (lambda: comp.get_num_materials(), lambda: len(comp.get_materials())):
+        try:
+            total = int(call())
+            break
+        except Exception:
+            continue
+    if not total:
+        tried.append("override_probe:slot_count_unreadable")
+        return None
+    hits = 0
+    for index in range(total):
+        try:
+            resolved = comp.get_material(index)
+        except Exception:
+            tried.append("override_probe:get_material_unavailable")
+            return None
+        if resolved is None:
+            continue
+        try:
+            got = str(resolved.get_path_name())
+        except Exception:
+            return None
+        base = paths[index] if index < len(paths) else None
+        if base is None or got != base:
+            hits += 1
+    return hits
+
+
+def _actor_record(unreal, actor, tried):
     """保真采集：回滚需要类/网格/变换/标签/子关卡，其余（碰撞、光照绑定）不承诺。"""
     cls = ""
     try:
@@ -250,14 +315,7 @@ def _actor_record(unreal, actor):
     mesh, _inst = _ac._mesh_probe(unreal, actor, cls)
     rec["mesh"] = mesh
     if cls == STATIC_MESH_ACTOR:
-        try:
-            rec["material_overrides"] = len(actor.get_material_override())
-        except Exception:
-            try:
-                comp = actor.get_component_by_class(unreal.StaticMeshComponent)
-                rec["material_overrides"] = len(comp.get_materials()) if comp else 0
-            except Exception:
-                pass
+        rec["material_overrides"] = _override_count(unreal, actor, tried)
     try:
         rec["tags"] = [str(t) for t in actor.tags]
     except Exception:
@@ -511,7 +569,7 @@ def opt_collapse_hism(mode="plan", mesh=None, min_count=5, limit=20, max_actors=
     buckets = {}
     scanned = 0
     for actor in list(all_actors)[:_int(max_actors, 20000)]:
-        rec = _actor_record(unreal, actor)
+        rec = _actor_record(unreal, actor, tried)
         if class_contains and str(class_contains).lower() not in str(rec["class"]).lower():
             continue
         if tag and not _ac._has_tag(actor, tag):
@@ -521,8 +579,11 @@ def opt_collapse_hism(mode="plan", mesh=None, min_count=5, limit=20, max_actors=
             continue
         buckets.setdefault(rec["mesh"], []).append(rec)
         live[rec["name"]] = actor
+        overrides = rec["material_overrides"]
+        if overrides is None:
+            result["material_override_unknown"] += 1
         rows.append((rec["mesh"], rec["class"], rec["level"], rec["name"],
-                     bool(rec["material_overrides"])))
+                     bool(overrides)))
     selection = _select_groups(rows, mesh=mesh, min_count=_int(min_count, 5),
                                limit=_int(limit, 20), allow_blockers=allow_blockers,
                                allow_material_overrides=allow_material_overrides)
