@@ -614,6 +614,202 @@ def fix_broken_references(folder: Annotated[str, Field(description="扫描/修�
          "confirm": confirm, "limit": int(limit)})
 
 
+# ---------------- v1.5 优化族（纹理流送池 / Nanite / 合批；读诊断 + opt_ 双钥写入）----------------
+
+def _bool_opt(name, value, default):
+    """MCP 通道把 bool 送成字符串：统一走 _as_bool，异常转结构化错误（双钥契约不靠运气）。"""
+    try:
+        return _as_bool(value, default=default), None
+    except ValueError as exc:
+        return None, envelope.make_err(envelope.Code.RUNTIME_ERROR, str(exc))
+
+
+def scan_texture_streaming(folder: Annotated[str, Field(description="Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包取纹理（如 /Game/Main_City）")] = None, paths: Annotated[str | None, Field(description="只查这些纹理（逗号/分号/换行分隔；给了就忽略 folder/map）")] = None, max_assets: Annotated[int, Field(description="本窗口最多度量多少张（按磁盘体量降序）；载入编辑器内存有代价")] = 200, min_mb: Annotated[float, Field(description="单张运行时估算低于此 MB 且无收益则不列进 items（仍计入 summary）")] = 4.0, top: Annotated[int, Field(description="items 返回条数上限")] = 25, offset: Annotated[int, Field(description="分页偏移（按体量降序窗口）")] = 0, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """纹理流送池只读诊断（TODO Feature 1a）。Needs live bridge.
+
+    按 folder / 关卡闭包 / 显式 paths 枚举纹理，逐张给全链运行时估算并归入
+    池内 / 池外常驻(never_stream) / 已虚拟化，汇出 pool_demand_mb 与三档收益
+    （钳尺寸 / 开 VT / 改压缩），并读工程 ini 的 *PoolSize 给 overflow 判定。
+    口径与 get_perf_report 的 oversized_mip / uncompressed_texture /
+    texture_streaming_overflow 同源（prism/streaming.py），两套账不会打架。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    return bus.BusClient(bus_dir, timeout=240).call(
+        "scan_texture_streaming",
+        {"folder": folder, "map": map, "paths": paths, "max_assets": int(max_assets),
+         "min_mb": float(min_mb), "top": int(top), "offset": int(offset)})
+
+
+def opt_texture_set_virtual(paths: Annotated[str | None, Field(description="要改的纹理（逗号/分号/换行分隔）；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围：Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, limit: Annotated[int, Field(description="本窗口最多处理多少张（按体量降序）")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划（每张 before→after + 预计省多少 MB），不写盘")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥（写操作契约）")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """批量开虚拟纹理（写·双钥；TODO Feature 1b）。Needs live bridge.
+
+    Cube/Volume 不支持 VT -> skipped；已虚拟 -> no_op；属性写不进 -> failed + tried。
+    工程需启用 VT（返回体 vt_enabled_project 给 ini 判定，None=没读到）。改完需保存，
+    虚拟化数据由编辑器/ cook 生成；复跑 scan_texture_streaming 核对池需求下降。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    dry_run, e1 = _bool_opt("dry_run", dry_run, True)
+    confirm, e2 = _bool_opt("confirm", confirm, False)
+    if e1 or e2:
+        return e1 or e2
+    return bus.BusClient(bus_dir, timeout=300).call(
+        "opt_texture_set_virtual",
+        {"paths": paths, "folder": folder, "map": map, "limit": int(limit),
+         "dry_run": dry_run, "confirm": confirm})
+
+
+def opt_texture_clamp_max_size(paths: Annotated[str | None, Field(description="要改的纹理；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围：Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, max_size: Annotated[int, Field(description="钳到的分辨率（0=取消限制，属放大动作，会显著提示）")] = 2048, only_if_larger: Annotated[bool, Field(description="默认 true=只对大于 max_size 的生效")] = True, limit: Annotated[int, Field(description="本窗口最多处理多少张")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """批量钳 MaxTextureSize（写·双钥；TODO Feature 1b）。Needs live bridge.
+
+    降流送池压力最便宜的一刀：只改属性，不动源图。dry-run 给每张 before→after
+    与 savings_mb；已达标/已在阈值内 -> no_op。改动需编辑器重压缩才反映到盘上。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    dry_run, e1 = _bool_opt("dry_run", dry_run, True)
+    confirm, e2 = _bool_opt("confirm", confirm, False)
+    only_if_larger, e3 = _bool_opt("only_if_larger", only_if_larger, True)
+    if e1 or e2 or e3:
+        return e1 or e2 or e3
+    return bus.BusClient(bus_dir, timeout=300).call(
+        "opt_texture_clamp_max_size",
+        {"paths": paths, "folder": folder, "map": map, "max_size": int(max_size),
+         "only_if_larger": only_if_larger, "limit": int(limit),
+         "dry_run": dry_run, "confirm": confirm})
+
+
+def opt_texture_set_compression(paths: Annotated[str | None, Field(description="要改的纹理；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, compression: Annotated[str, Field(description="目标格式友好名：default/normal/masks/editoricon（大小写与下划线不敏感）")] = "default", only_uncompressed: Annotated[bool, Field(description="默认 true=只动非工程运行时格式（真未压缩系 / EditorIcon 这类禁流送系）；格式文本判不准也不动")] = True, limit: Annotated[int, Field(description="本窗口最多处理多少张")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """批量改压缩格式（写·双钥；TODO Feature 1b 可选项）。Needs live bridge.
+
+    两类非工程运行时格式，收益口径不同（结果里分行给 savings_mb）：
+      * 未压缩/浮点系：按 4B/px 计，改 TC_Default 约省 3/4 池；
+      * TC_EDITOR_ICON / TC_MAX：无 mip 且禁用流送，整张恒常驻池外——改回 TC_Default
+        是"变可流送、释放常驻"，不是省池，开 VT 对它无从谈起。
+    默认只动这两类（only_uncompressed），格式文本判不准(unknown)一律不动，避免误伤
+    美术贴图；确认要强改传 only_uncompressed=False。改完需重压缩（保存后编辑器/下次 cook）。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    dry_run, e1 = _bool_opt("dry_run", dry_run, True)
+    confirm, e2 = _bool_opt("confirm", confirm, False)
+    only_uncompressed, e3 = _bool_opt("only_uncompressed", only_uncompressed, True)
+    if e1 or e2 or e3:
+        return e1 or e2 or e3
+    return bus.BusClient(bus_dir, timeout=300).call(
+        "opt_texture_set_compression",
+        {"paths": paths, "folder": folder, "map": map, "compression": str(compression),
+         "only_uncompressed": only_uncompressed, "limit": int(limit),
+         "dry_run": dry_run, "confirm": confirm})
+
+
+def scan_nanite_candidates(folder: Annotated[str, Field(description="Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包取网格")] = None, paths: Annotated[str | None, Field(description="只查这些网格")] = None, min_triangles: Annotated[int, Field(description="低于此 LOD0 三角数算 low_complexity（默认 20 万，同 rules.mesh_tri warn）")] = 200000, max_assets: Annotated[int, Field(description="本窗口最多度量多少个网格")] = 200, top: Annotated[int, Field(description="items 返回条数上限")] = 40, offset: Annotated[int, Field(description="分页偏移")] = 0, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """Nanite 只读候选与冲突分析（TODO Feature 2a）。Needs live bridge.
+
+    分类：enable_candidate（高面数未开，材质不半透明）/ conflict_translucent
+    （已开却挂半透明 = 静默降级 + 刷警告）/ blocked_translucent（半透明不建议开）/
+    already_ok / low_complexity / unknown_api（跨版本读不到开关）。
+    附带汇报需补 bUsedWithNanite 的材质（本工具不改材质）。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    return bus.BusClient(bus_dir, timeout=240).call(
+        "scan_nanite_candidates",
+        {"folder": folder, "map": map, "paths": paths, "min_triangles": int(min_triangles),
+         "max_assets": int(max_assets), "top": int(top), "offset": int(offset)})
+
+
+def opt_mesh_set_nanite(paths: Annotated[str | None, Field(description="要改的网格；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选网格")] = None, enabled: Annotated[bool, Field(description="true=开 Nanite，false=关")] = True, skip_translucent: Annotated[bool, Field(description="默认 true=挂半透明材质的网格不开（开了也静默降级+刷警告）")] = True, limit: Annotated[int, Field(description="本窗口最多处理多少个网格")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """批量开/关 Nanite（写·双钥；TODO Feature 2b）。Needs live bridge.
+
+    跨版本属性漂移（5.0/5.1 bSupportsNanite -> 5.3 NaniteSettings.enabled -> 5.4 再变）
+    走多候选 + 回读校验，写不进就 failed+tried，不假成功。半透明材质默认拦截。
+    收益是 drawcall/帧时间与日志噪音，不是 MB，故 savings_mb=0，判据看 triangles/blend_modes。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    enabled, e0 = _bool_opt("enabled", enabled, True)
+    skip_translucent, e1b = _bool_opt("skip_translucent", skip_translucent, True)
+    dry_run, e1 = _bool_opt("dry_run", dry_run, True)
+    confirm, e2 = _bool_opt("confirm", confirm, False)
+    if e0 or e1b or e1 or e2:
+        return e0 or e1b or e1 or e2
+    return bus.BusClient(bus_dir, timeout=300).call(
+        "opt_mesh_set_nanite",
+        {"paths": paths, "folder": folder, "map": map, "enabled": enabled,
+         "skip_translucent": skip_translucent, "limit": int(limit),
+         "dry_run": dry_run, "confirm": confirm})
+
+
+def fix_nanite_translucent(paths: Annotated[str | None, Field(description="要处理的网格；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选网格")] = None, limit: Annotated[int, Field(description="本窗口最多处理多少个网格")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回冲突清单与计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """关掉"已开 Nanite 却挂半透明材质"的网格（写·双钥；TODO Feature 2b）。Needs live bridge.
+
+    只动这一类冲突，正常 Nanite 网格不碰；材质 blend_mode 读不到时跳过（不误关）。
+    关闭是降级不是损坏：网格按原 LOD 正常渲染，编辑器日志的成万条警告随之消失。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    dry_run, e1 = _bool_opt("dry_run", dry_run, True)
+    confirm, e2 = _bool_opt("confirm", confirm, False)
+    if e1 or e2:
+        return e1 or e2
+    return bus.BusClient(bus_dir, timeout=300).call(
+        "fix_nanite_translucent",
+        {"paths": paths, "folder": folder, "map": map, "limit": int(limit),
+         "dry_run": dry_run, "confirm": confirm})
+
+
+def analyze_instancing(min_count: Annotated[int, Field(description="同网格重复多少个才算合批组（默认 5）")] = 5, cap: Annotated[int, Field(description="groups 返回条数上限")] = 40, include_samples: Annotated[int, Field(description="每组采样多少 Actor 名（便于核对）")] = 10, class_contains: Annotated[str | None, Field(description="按 Actor 类名子串过滤")] = None, tag: Annotated[str | None, Field(description="按 Actor tag 过滤")] = None, export: Annotated[bool, Field(description="true=另把方案落一份 JSON 到 <bus>/plans/（只写方案文件，不碰关卡与 Content）")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """当前关卡的 HISM/ISM 合并方案（只读；TODO Feature 3a + D2 路线 B）。Needs live bridge.
+
+    分组键=网格包路径；给可折叠 Actor 数与 drawcall 前/后估算，并把混入蓝图放置器
+    （非 StaticMeshActor）的组标成 blockers——合并前必须人工确认。
+    默认只回方案不动场景；真要折叠成 HISM 属高风险写操作，需另开 PR 且先提交 VCS。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    env = bus.BusClient(bus_dir, timeout=240).call(
+        "analyze_instancing",
+        {"min_count": int(min_count), "cap": int(cap),
+         "include_samples": int(include_samples), "class_contains": class_contains,
+         "tag": tag})
+    if _as_bool(export, default=False) and env.get("ok"):
+        env["result"]["export"] = _export_instancing_plan(bus_dir, env["result"])
+    return env
+
+
+def _export_instancing_plan(bus_dir, result):
+    """路线 B 落盘：只把方案写成 JSON（<bus>/plans/），不触碰关卡/Content/资产。"""
+    import json as _json
+    import time as _time
+    folder = os.path.join(str(bus_dir), "plans")
+    stamp = "%s_%d" % (_time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime()),
+                       int(_time.time() * 1000) % 1000)
+    path = os.path.join(folder, "instancing_%s.json" % stamp)
+    tmp = path + ".tmp"
+    payload = {"stamp": stamp, "summary": result.get("summary"),
+               "groups": result.get("groups"), "plan": result.get("plan"),
+               "world_total_actors": result.get("world_total_actors")}
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            _json.dump(payload, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)   # 原子写：别让半截计划被读到
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)[:200], "path": path}
+    return {"ok": True, "path": path,
+            "note": "只落方案文件（路线 B）；未改关卡 Actor、未写 Content"}
+
+
 _TOOLS = (
     ping, list_level_actors, describe_asset, get_asset_references, get_asset_metrics,
     get_asset_chain, scan_orphan_assets, scan_broken_references,
@@ -622,6 +818,9 @@ _TOOLS = (
     get_perf_report, list_perf_rules,
     list_projects, preview_asset_migration, migrate_asset_rename, migrate_asset_move, migrate_asset,
     fix_broken_references,
+    scan_texture_streaming, opt_texture_set_virtual, opt_texture_clamp_max_size,
+    opt_texture_set_compression, scan_nanite_candidates, opt_mesh_set_nanite,
+    fix_nanite_translucent, analyze_instancing,
 )
 
 
