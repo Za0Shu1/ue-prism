@@ -93,6 +93,26 @@ def test_measure_texture_with_probe_fills_source_ledger():
     assert m["source_disk_bytes"] == 4096 and m["source_memory_bytes"] == 8388608
 
 
+def test_texture_write_ops_expose_and_honor_probe_knob():
+    from prism.domain import opt_texture as ot
+    ops = ((ot.opt_texture_clamp_max_size, {"max_size": 2048}),
+           (ot.opt_texture_set_virtual, {}),
+           (ot.opt_texture_set_compression, {"compression": "default"}))
+    for fn, kw in ops:
+        res = fn(paths="/Game/T/X", probe_source="false", **kw)["result"]
+        assert res["source_probe"] == "off", fn.__name__
+        res2 = fn(paths="/Game/T/X", **kw)["result"]
+        assert res2["source_probe"] == "on", fn.__name__
+
+
+def test_write_ops_still_double_key_guarded_with_probe_off():
+    from prism.domain import opt_texture as ot
+    env = ot.opt_texture_clamp_max_size(paths="/Game/T/X", max_size=1024,
+                                        dry_run=False, confirm=False,
+                                        probe_source="false")
+    assert env["ok"] is False and "双钥" in env["error"]["message"]
+
+
 def test_reset_cache_allows_reprobe():
     tex = _Tex()
     M._source_probe(tex, [])

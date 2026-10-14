@@ -511,7 +511,72 @@ def _opt_instancing_checks(r):
     return {"cube_actors": cube_g.get("actors"), "elapsed_s": dt}
 
 
-def run_all(bus_dir, project_dir):
+def _opt_hism_checks(r, roundtrip=False):
+    """路线 A（真折叠成 HISM）真值校验：CalibMap 已知 1500 个散装引擎 Cube。
+
+    常驻必查：plan 不动场景、写态双钥守卫、非法 mode 被拒。
+    可选（--hism-roundtrip）：真折叠 -> 校验 Actor 数下降 -> 按清单回滚 -> 校验数量回来。
+    回滚会重写关卡两次，只在显式要求时跑（其余校验只依赖数量，不依赖对象名）。
+    """
+    cube_mesh = "/Engine/BasicShapes/Cube"
+    base = r.call("analyze_instancing", {"min_count": 100, "cap": 5})
+    before_total = int(base.get("world_total_actors") or 0)
+    pl, dt = _t(lambda: r.call("opt_collapse_hism", {"min_count": 100, "limit": 3}))
+    rows = {g.get("mesh"): g for g in pl.get("groups") or []}
+    cube = rows.get(cube_mesh) or {}
+    r.check("hism.plan_does_not_touch_scene",
+            pl.get("mode") == "plan" and pl.get("dry_run") is True
+            and pl.get("executed") is False and pl.get("success") is False
+            and int(cube.get("actors") or 0) >= 1000
+            and pl.get("manifest_path") is None
+            and int(pl.get("planned") or 0) == int(pl.get("drawcalls_before") or 0)
+            - int(pl.get("drawcalls_after") or 0),
+            {"cube_actors": cube.get("actors"), "planned": pl.get("planned"),
+             "drawcalls": [pl.get("drawcalls_before"), pl.get("drawcalls_after")],
+             "elapsed_s": dt})
+    env_guard = r.client.call("opt_collapse_hism", {
+        "mode": "collapse", "min_count": 100,
+        "dry_run": False, "confirm": False})
+    r.check("hism.collapse_needs_double_key",
+            env_guard.get("ok") is False
+            and "双钥" in ((env_guard.get("error") or {}).get("message") or ""),
+            (env_guard.get("error") or {}).get("message"))
+    env_mode = r.client.call("opt_collapse_hism", {"mode": "yolo"})
+    r.check("hism.bad_mode_is_rejected", env_mode.get("ok") is False,
+            (env_mode.get("error") or {}).get("message"))
+    out = {"cube_actors": cube.get("actors"), "world_total_actors": before_total}
+    if not roundtrip:
+        return out
+    mf = os.path.join(str(r.bus_dir), "hism_roundtrip.json")
+    col, dt2 = _t(lambda: r.call("opt_collapse_hism", {
+        "mode": "collapse", "min_count": 100, "limit": 1, "mesh": cube_mesh,
+        "manifest": mf, "dry_run": False, "confirm": True}))
+    mid = int((r.call("analyze_instancing", {"min_count": 100, "cap": 5})
+               or {}).get("world_total_actors") or 0)
+    r.check("hism.collapse_reduces_actors",
+            col.get("executed") is True and col.get("hism_created") == 1
+            and int(col.get("actors_instanced") or 0) >= 1000
+            and col.get("rollback_available") is True and os.path.exists(mf)
+            and mid < before_total,
+            {"hism_created": col.get("hism_created"),
+             "instanced": col.get("actors_instanced"),
+             "destroyed": col.get("actors_destroyed"), "actors_before": before_total,
+             "actors_after": mid, "elapsed_s": dt2, "note": col.get("note")})
+    res, dt3 = _t(lambda: r.call("opt_collapse_hism", {
+        "mode": "restore", "manifest": mf, "dry_run": False, "confirm": True}))
+    back = int((r.call("analyze_instancing", {"min_count": 100, "cap": 5})
+                or {}).get("world_total_actors") or 0)
+    r.check("hism.restore_round_trips",
+            res.get("executed") is True and int(res.get("changed") or 0) >= 1000
+            and back >= before_total,
+            {"recreated": res.get("changed"), "hism_destroyed": res.get("actors_destroyed"),
+             "actors_now": back, "actors_expected_ge": before_total, "elapsed_s": dt3,
+             "note": res.get("note")})
+    out["roundtrip"] = {"before": before_total, "collapsed_to": mid, "back_to": back}
+    return out
+
+
+def run_all(bus_dir, project_dir, roundtrip=False):
     r = Runner(bus_dir)
     pg = r.call("ping", {})
     r.check("ping.bridge_alive", pg.get("bridge_alive") is True,
@@ -678,6 +743,7 @@ def run_all(bus_dir, project_dir):
     opt_tex = _safe(r, "opt.texture", lambda: _opt_texture_checks(r)) or {}
     opt_nan = _safe(r, "opt.nanite", lambda: _opt_nanite_checks(r)) or {}
     opt_ins = _safe(r, "opt.instancing", lambda: _opt_instancing_checks(r)) or {}
+    opt_hism = _safe(r, "opt.hism", lambda: _opt_hism_checks(r, roundtrip)) or {}
     matrix = {
         "ue_version": pg.get("ue_version"),
         "metrics_tried": {k: v.get("tried") for k, v in items.items()},
@@ -686,6 +752,7 @@ def run_all(bus_dir, project_dir):
         "opt_texture": opt_tex,
         "opt_nanite": opt_nan,
         "opt_instancing": opt_ins,
+        "opt_hism": opt_hism,
     }
     return r.results, matrix
 
@@ -698,7 +765,8 @@ def main(argv):
     out_path = None
     if "--out" in argv:
         out_path = argv[argv.index("--out") + 1]
-    results, matrix = run_all(bus_dir, project_dir)
+    results, matrix = run_all(bus_dir, project_dir,
+                              roundtrip="--hism-roundtrip" in argv)
     failed = [x["name"] for x in results if not x["pass"]]
     if out_path:
         with open(out_path, "w", encoding="utf-8") as f:

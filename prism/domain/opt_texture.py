@@ -241,8 +241,9 @@ def _drive(op, paths, folder, map_path, limit, offset, dry_run, confirm,
                     extra=extra, model=_st.POOL_MODEL)
 
 
-def _entry_of(unreal, obj, target, tried):
-    metrics = _measure(unreal, obj, tried)
+def _entry_of(unreal, obj, target, tried, probe_source=True):
+    metrics = _measure(unreal, obj, tried,
+                       probe_source=_m._u_bool(probe_source, True))
     if metrics is None:
         return None, None
     entry = _st.texture_pool_entry(metrics, target["class"], target.get("disk_bytes"),
@@ -252,7 +253,7 @@ def _entry_of(unreal, obj, target, tried):
 
 @register
 def opt_texture_set_virtual(paths=None, folder="/Game", map=None, limit=200, offset=0,
-                            dry_run=True, confirm=False):
+                            dry_run=True, confirm=False, probe_source=True):
     """批量开虚拟纹理（写·双钥）。Cube/Volume -> skipped；已虚拟 -> no_op。
 
     前置条件：工程需启用 VT（RendererSettings/DeviceProfile），本函数只改资产属性，
@@ -270,7 +271,7 @@ def opt_texture_set_virtual(paths=None, folder="/Game", map=None, limit=200, off
         if before:
             return {"kind": "no_op", "before": True, "after": True,
                     "reason": "已是虚拟纹理（池压力已解）"}
-        _metrics, entry = _entry_of(unreal, obj, target, tried)
+        _metrics, entry = _entry_of(unreal, obj, target, tried, probe_source)
         savings = entry["vt_savings_mb"] if entry else 0.0
         return {"kind": "change", "before": False, "after": True, "prop_hit": hit,
                 "savings_mb": savings, "runtime_mb": entry["runtime_mb"] if entry else None}
@@ -287,9 +288,10 @@ def opt_texture_set_virtual(paths=None, folder="/Game", map=None, limit=200, off
             vt_flag = _st.vt_enabled(_st.read_pool_config(_project_dir(unreal)))
         except Exception:
             vt_flag = None
+    probe = "on" if _u.to_bool(probe_source, True) else "off"
     out = _drive("opt_texture_set_virtual", paths, folder, map, limit, offset,
                  dry_run, confirm, inspect, write,
-                 extra={"vt_enabled_project": vt_flag})
+                 extra={"vt_enabled_project": vt_flag, "source_probe": probe})
     return out
 
 
@@ -336,7 +338,7 @@ def _clamp_decision(entry, want, only_if_larger=True, widen=False):
 @register
 def opt_texture_clamp_max_size(paths=None, folder="/Game", map=None, max_size=2048,
                                only_if_larger=True, limit=200, offset=0,
-                               dry_run=True, confirm=False):
+                               dry_run=True, confirm=False, probe_source=True):
     """批量钳 MaxTextureSize（写·双钥）。只对大于目标的生效（only_if_larger）。
 
     max_size=0 表示"取消限制"，属放大风险动作：only_if_larger 会被忽略并显著提示。
@@ -349,7 +351,7 @@ def opt_texture_clamp_max_size(paths=None, folder="/Game", map=None, max_size=20
     widen = want == 0
 
     def inspect(unreal, obj, target, tried):
-        metrics, entry = _entry_of(unreal, obj, target, tried)
+        metrics, entry = _entry_of(unreal, obj, target, tried, probe_source)
         if entry is None:
             return {"kind": "unknown", "note": "度量失败（签名漂移？）", "tried": tried[-6:]}
         return _clamp_decision(entry, want, only_if_larger=only_if_larger, widen=widen)
@@ -357,9 +359,11 @@ def opt_texture_clamp_max_size(paths=None, folder="/Game", map=None, max_size=20
     def write(unreal, obj, decision, target):
         return _u.set_prop_any(obj, ("max_texture_size",), int(decision["after"]))
 
+    probe = "on" if _u.to_bool(probe_source, True) else "off"
     return _drive("opt_texture_clamp_max_size", paths, folder, map, limit, offset,
                   dry_run, confirm, inspect, write,
-                  extra={"max_size": want, "only_if_larger": _u.to_bool(only_if_larger, True)})
+                  extra={"max_size": want, "only_if_larger": _u.to_bool(
+                      only_if_larger, True), "source_probe": probe})
 
 
 def _resolve_compression(unreal, name):
@@ -441,7 +445,7 @@ def _compression_gate(fmt, only_uncompressed, before, target=None):
 @register
 def opt_texture_set_compression(paths=None, folder="/Game", map=None, compression="default",
                                 only_uncompressed=True, limit=200, offset=0,
-                                dry_run=True, confirm=False):
+                                dry_run=True, confirm=False, probe_source=True):
     """批量改压缩格式（写·双钥）。默认只动非工程运行时格式（未压缩系 / EditorIcon 系）。
 
     这是池收益的大头（TODO 里标"可选"但实测最猛）：只改属性，重压缩由编辑器在保存后/
@@ -466,7 +470,7 @@ def opt_texture_set_compression(paths=None, folder="/Game", map=None, compressio
                                  None if target_value is None else str(target_value))
         if gate:
             return gate
-        metrics, entry = _entry_of(unreal, obj, target, tried)
+        metrics, entry = _entry_of(unreal, obj, target, tried, probe_source)
         if entry is None:
             savings, runtime = 0.0, None
             release = 0.0
@@ -494,10 +498,11 @@ def opt_texture_set_compression(paths=None, folder="/Game", map=None, compressio
         ok, hit, tried2 = _u.set_prop_any(obj, ("compression_settings",), value)
         return ok, "%s -> %s" % (sig, hit), (sub_tried + tried2)
 
+    probe = "on" if _u.to_bool(probe_source, True) else "off"
     out = _drive("opt_texture_set_compression", paths, folder, map, limit, offset,
                  dry_run, confirm, inspect, write,
-                 extra={"compression": str(compression),
-                        "only_uncompressed": _u.to_bool(only_uncompressed, True)})
+                 extra={"compression": str(compression), "only_uncompressed": _u.to_bool(
+                     only_uncompressed, True), "source_probe": probe})
     if isinstance(out, dict) and out.get("ok") and out["result"]["changed"]:
         out["result"]["note"] += " 注意：压缩格式改动需重压缩（编辑器保存后自动/或 Reimport），未 cook 前盘上体积不变。"
     return out

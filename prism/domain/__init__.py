@@ -25,3 +25,4 @@ from . import optutil  # noqa: E402,F401  # v1.5：opt_/fix_ 共用骨架（自�
 from . import opt_texture  # noqa: E402,F401  # v1.5 PR-1/2：纹理流送池诊断 + 批量 VT/MaxSize/压缩
 from . import opt_nanite  # noqa: E402,F401  # v1.5 PR-1/3：Nanite 候选/冲突 + 批量开关
 from . import opt_instancing  # noqa: E402,F401  # v1.5 PR-1：HISM 合批分析（只出方案）
+from . import opt_hism  # noqa: E402,F401  # v1.5 PR-5：HISM 折叠执行（路线 A，写场景 + 回滚清单）

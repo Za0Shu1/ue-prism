@@ -14,7 +14,8 @@ from prism.domain import opt_instancing
 NEW_TOOLS = ("scan_texture_streaming", "opt_texture_set_virtual",
              "opt_texture_clamp_max_size", "opt_texture_set_compression",
              "scan_nanite_candidates", "opt_mesh_set_nanite",
-             "fix_nanite_translucent", "analyze_instancing")
+             "fix_nanite_translucent", "analyze_instancing",
+             "opt_collapse_hism")
 
 
 class _Fake(object):
@@ -51,7 +52,7 @@ def _ok(result):
 def test_new_tools_are_registered():
     names = {t.__name__ for t in server._TOOLS}
     assert set(NEW_TOOLS) <= names
-    assert len(server._TOOLS) == 29
+    assert len(server._TOOLS) == 30
 
 
 # ---------- 只读工具转发 ----------

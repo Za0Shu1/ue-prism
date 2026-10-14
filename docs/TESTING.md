@@ -9,7 +9,7 @@
 |---|---|---|---|
 | **L0 离线套件** | 无引擎，Python>=3.10 | `python -m pytest` | 协议/信封/总线/规则纯逻辑/降级结构契约。改任何层必跑 |
 | **L1 桥冒烟** | 编辑器在线 | `python scripts/verify_connection.py`；`python scripts/bus_call.py <bus_dir> ping` | 心跳、往返、UE 版本 |
-| **L2 校准夹具** | 任意 UE5 工程装好桥插件（编辑器在线） | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 53 项校验（含写路径 rename/move/copy 往返 + v1.5 优化族 28 项属性读写往返，均自还原，见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
+| **L2 校准夹具** | 任意 UE5 工程装好桥插件（编辑器在线） | `python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe>` | 已知真值资产端到端 56 项校验（含写路径 rename/move/copy 往返 + v1.5 优化族 28 项属性读写往返，均自还原，见下），并落 `matrix.json`（ue_version/API tried 命中/计时）——跨版本跑即得兼容矩阵 |
 | **L2/L3 cook·package 全链路** | 任意 UE5 工程 + 本机 UE（**编辑器须关闭**） | `python scripts/verify_cook_chain.py --project <P> [--mode cook\|package]` | cook_package 真实全链路：dry-run 组装→双钥真执行→轮询状态→校验产物落盘→日志错误归因。`--mode cook` 校验 cooked `.umap`（9 项，L2）；`--mode package` 真编 `-build -cook -stage -pak -archive` 并校验归档内 `.exe`/`.pak`（10 项，L3——首编耗时长）。因需编辑器关闭、且不经过桥，与 run_fixture 互斥、单独成脚本 |
 | **L3 真实工程抽样** | 客户的真实大工程 | 人工驱动 MCP 工具 + 抽检 | 假阳性率、大闭包耗时、阈值手感 |
 
@@ -28,7 +28,7 @@
 | `M_CalibInst`(MIC，父 `M_CalibRef`) + `CalibMeshInstance` | 5.4 探针实证：`MaterialInstanceConstant` **直读 `used_with_nanite` 必抛异常**，开关只在父 `UMaterial` 上（`get_base_material()` 够得着） | `scan_nanite_candidates` 材质清单必须给**非 null** 的 `used_with_nanite`，`usage_api` 记是否经 `get_base_material()`（旧实现在真实工程 5/5 材质恒 null） |
 | `CalibMesh` | 引擎 StaticMesh(Cube) 副本 | 材质槽=最大 section 数（5.4 从 `get_num_sections` 派生，已知真值 1 槽）；碰撞面数在 5.4 `UStaticMesh` python 无访问器（绑定限制，非漏报） |
 | `T_Orphan1..3`、`T_Used1K` | 无引用 | `scan_orphan_assets` 全命中；`CalibMap` 作为 level_root 被正确排除 |
-| `CalibMap` | 1500 个平铺 SM_Cube（`PRISM_FIXTURE_ACTORS` 可调） | compose 聚合 world>=1400；`/Engine/BasicShapes/Cube x1500` 进合批机会清单 |
+| `CalibMap` | 1500 个平铺 SM_Cube（`PRISM_FIXTURE_ACTORS` 可调） | compose 聚合 world>=1400；`/Engine/BasicShapes/Cube x1500` 进合批机会清单；也是 `opt_collapse_hism` 的折叠/回滚真值靶（1500 -> 1 HISM -> 回滚 1500） |
 | 写路径靶（复用 `T_CalibCube`/`T_Used1K`） | 改名/移动往返（内存态，自还原，不落盘） | `migrate_asset_rename` 走 `rename_asset` 候选链 + 注册表核对旧消失/新存在/还原；`migrate_asset_move` 实证 5.4 无 `move_asset`，`AttributeMissing` 后走 `rename_asset` 全路径兜底（固化该真机分支） |
 | `M_CalibRef` → `T_CalibRef` | 材质硬引用贴图（`TextureSample`→BaseColor） | `get_asset_references` `classify_soft=True`：`T_CalibRef` 的 used_by 中 `M_CalibRef` 判为 `hard=True/soft=False`、`used_by_soft_count=0`（软引用正样本待 L3——5.4 无头 python 无稳定造 SoftObjectProperty 资产的途径） |
 | `M_CalibBroken` → `T_CalibBroken`（生成材质后删贴图） | 材质 import 表仍记录已删包 = 悬空硬引用 | `scan_broken_references` 判 `missing`（`get_dependencies` name+opts 仍返回该路径，注册表解析不到）；同批健康靶 `T_CalibRef` 不误报（假阳性负控） |
@@ -47,9 +47,9 @@
 - 材质槽取回的是 `MaterialInterface`：`blend_mode` 在接口上可读，`used_with_nanite` 只在基类材质上，
   读不到必须 `base_material()` 解包再试一次（仍读不到才留 null，不猜值）。
 
-### v1.5 优化族真值校验（`_opt_texture_checks` / `_opt_nanite_checks` / `_opt_instancing_checks`）
+### v1.5 优化族真值校验（`_opt_texture_checks` / `_opt_nanite_checks` / `_opt_instancing_checks` / `_opt_hism_checks`）
 
-这三组校验直接打 `scan_texture_streaming` / `opt_*` / `fix_nanite_translucent` / `analyze_instancing`
+这四组校验直接打 `scan_texture_streaming` / `opt_*` / `fix_nanite_translucent` / `analyze_instancing` / `opt_collapse_hism`
 的真机属性读写路径（L0 只能测降级结构与纯数学，签名命中必须真机钉）：
 
 | 校验点 | 已知真值 | 断言 |
@@ -144,7 +144,7 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 
 ## 引擎兼容矩阵（实测）
 
-同一套 `run_fixture`（53 项：域层 `unreal` API + 规则 + 枚举不变量）与 `verify_cook_chain`（cook 9 项 / package 10 项）在不同引擎版本各跑一次即成矩阵。当前实测：
+同一套 `run_fixture`（56 项：域层 `unreal` API + 规则 + 枚举不变量）与 `verify_cook_chain`（cook 9 项 / package 10 项）在不同引擎版本各跑一次即成矩阵。当前实测：
 
 | 引擎 | L2 夹具 run_fixture | cook 全链路 | package 全链路 |
 |---|---|---|---|
@@ -160,7 +160,7 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 - 本机覆盖状态：**5.4.4 夹具 53/53 + cook 9/9 + package Dev/Shipping 各 10/10**；
   5.3.2 仍是旧 22 项全绿，**v1.5 优化族与 HDR 台账未在 5.3 复跑**。更多版本（5.5/5.8 等）在其他机器补跑。
 
-## 工具覆盖矩阵（当前 29 个 MCP 工具）
+## 工具覆盖矩阵（当前 30 个 MCP 工具）
 
 | 工具 | L0 离线用例 | L2 夹具 checks | 仍欠（L3 真实工程） |
 |---|---|---|---|
@@ -184,7 +184,8 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 | `opt_texture_set_virtual` / `opt_texture_clamp_max_size` / `opt_texture_set_compression`（写·双钥） | test_opt_texture(+双钥/字符串 bool 归一/负 max_size/建议文案/high_bpp 闸门/别名解析/同名格式 no_op + `_enum_member` 文本形态) + test_opt_server_contract(脏 bool 不建客户端/export 原子写) | streaming.clamp_dry_run_does_not_write / clamp_write_honest / clamp_readback_from_disk / clamp_restored_for_next_run / vt_write_blocks_cube / compression.already_target_is_no_op / conservative_gate_still_blocks_high_bpp | 重压缩时机与盘上体积回落（改压缩需编辑器重压缩，cook 前磁盘不变）；`bUsedWithVT` 需工程开 VT 才有真收益；TC_HDR 需 `only_uncompressed=False` 才动（默认挡在闸门外） |
 | `scan_nanite_candidates`（只读） | test_opt_nanite（27 用例：分类六态 + 降级键常驻 + `base_material()` 三态解包 + 材质清单非 null） | nanite.target_blocked_before_write / conflict_detected / material_usage_readable_via_base_material / material_instance_usage_not_null | 真实高模候选阈值手感（`min_triangles`）；真实工程某网格 5 材质经 `get_base_material()` 全部读到确定值 |
 | `opt_mesh_set_nanite` / `fix_nanite_translucent`（写·双钥） | test_opt_nanite（三条版本签名钉死 + 写不进必须 failed + 半透明拦截 + blend_mode 读不到保守跳过） | nanite.skip_translucent_blocks / force_write_honest / fix_write_honest / self_restored | 材质 `bUsedWithNanite` 只报不改（动材质另议）；真实工程警告回落抽检 |
-| `analyze_instancing`（只读，D2 路线 B） | test_opt_instancing（分组/阻断/drawcall 前后纯逻辑） | compose.instancing_groups | 路线 A（真折叠成 HISM）未实现：UE 关卡 Actor 级改动无事务回滚，需另开 PR |
+| `analyze_instancing`（只读，D2 路线 B） | test_opt_instancing（分组/阻断/drawcall 前后纯逻辑） | compose.instancing_groups | 折叠动作本身交给 `opt_collapse_hism`；真实工程关卡仍需人工确认 blockers |
+| `opt_collapse_hism`（写·双钥，路线 A） | test_opt_hism（14 用例：拒收 blockers/材质覆盖/over_limit + 双钥先于引擎 + 假引擎折叠→清单→回滚闭环，其中位置回写真值逼出过一条 manifest 丢坐标缺陷） | hism.plan_does_not_touch_scene / hism.collapse_needs_double_key / hism.bad_mode_is_rejected（`--hism-roundtrip` 另跑 collapse_reduces_actors + restore_round_trips） | 清单只保类/网格/变换/标签/子关卡：碰撞、光照绑定、蓝图绑定不承诺复原；对象名由引擎重分配（身份靠 label） |
 | 基建（bus/envelope/cli/pluginpack/resolve） | test_bus / test_buscall / test_cli / test_pluginpack / test_resolve | - | - |
 
 ## 新功能测试纪律

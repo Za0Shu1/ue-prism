@@ -72,6 +72,8 @@ def main(argv=None):
     ap.add_argument("--editor", help="UnrealEditor.exe 全路径")
     ap.add_argument("--skip-assets", action="store_true")
     ap.add_argument("--checks-only", action="store_true")
+    ap.add_argument("--hism-roundtrip", action="store_true",
+                    help="真折叠 CalibMap 的 Cube 再按清单回滚（会写关卡两次）")
     ap.add_argument("--actors", default="1500")
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--matrix")
