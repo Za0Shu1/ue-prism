@@ -63,8 +63,20 @@ def test_scan_texture_streaming_forwards_scope_and_limits(monkeypatch):
     fn, args = h["c"].calls[0]
     assert env["ok"] is True and fn == "scan_texture_streaming"
     assert args == {"folder": "/Game/Tex", "map": "/Game/Main", "paths": None,
-                    "max_assets": 50, "min_mb": 1.5, "top": 4, "offset": 10}
+                    "max_assets": 50, "min_mb": 1.5, "top": 4, "offset": 10,
+                    "probe_source": True}
     assert h["c"].timeout >= 240          # 批量度量要走编辑器主线程，超时给足
+
+
+def test_scan_texture_streaming_probe_source_off_forwards_bool(monkeypatch):
+    """probe_source 必须归一成 bool 再下总线：脏字符串 "false" 不能被 domain 当真值。"""
+    h = _install(monkeypatch, _ok({"items": []}))
+    server.scan_texture_streaming(probe_source="false")
+    _fn, args = h["c"].calls[0]
+    assert args["probe_source"] is False
+    h2 = _install(monkeypatch, _ok({"items": []}))
+    server.scan_texture_streaming(probe_source=True)
+    assert h2["c"].calls[0][1]["probe_source"] is True
 
 
 def test_scan_nanite_candidates_forwards_thresholds(monkeypatch):

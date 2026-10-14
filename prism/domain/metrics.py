@@ -40,7 +40,48 @@ def _prop(obj, key):
             return None
 
 
-def _measure_texture(unreal, obj, tried):
+# 5.4 真实工程崩溃复盘：`blueprint_get_texture_source_disk_and_memory_size` 内部走
+# FTextureSource::CalcMipSize；贴图若正被编辑器重压缩（改 MaxSize/压缩格式会异步
+# BuildTexture），Mip 与 Block.NumMips 会瞬时不一致 -> 引擎 **Assertion failed:
+# MipIndex < Block.NumMips (Texture.cpp:2722)** 直接崩掉编辑器，Python 的 try 拦不住断言。
+# 源尺寸是导入源数据的属性（改 MaxSize 不动它），所以同一路径只探一次即可；
+# 批量写场景另给 probe_source=False 开关，彻底绕开该竞态窗口。
+_SOURCE_PROBE_CACHE = {}
+
+
+def reset_source_probe_cache():
+    """清空会话级源尺寸探针缓存（夹具/长跑批测之间隔离状态用）。"""
+    _SOURCE_PROBE_CACHE.clear()
+
+
+def _source_probe(obj, tried, probe_source=True):
+    """返回 (disk_bytes, memory_bytes) 或 None；同一路径只调一次引擎探针。"""
+    try:
+        key = str(obj.get_path_name())
+    except Exception:
+        key = ""
+    if key and key in _SOURCE_PROBE_CACHE:
+        cached = _SOURCE_PROBE_CACHE[key]
+        tried.append("blueprint_get_texture_source_disk_and_memory_size:cached"
+                     if cached else "blueprint_get_texture_source_disk_and_memory_size:failed_cached")
+        return cached
+    if not probe_source:
+        tried.append("source_probe:disabled")
+        return None
+    try:
+        raw = obj.blueprint_get_texture_source_disk_and_memory_size()
+        pair = (int(raw[0]), int(raw[1]))
+    except Exception:
+        if key:
+            _SOURCE_PROBE_CACHE[key] = None
+        return None
+    if key:
+        _SOURCE_PROBE_CACHE[key] = pair
+    tried.append("blueprint_get_texture_source_disk_and_memory_size")
+    return pair
+
+
+def _measure_texture(unreal, obj, tried, probe_source=True):
     """返回 {"width","height","memory_bytes"?,"source_disk_bytes"?} 或 None。
 
     5.4 真机校准（probe_asset_api 实测）：blueprint_get_size_x/y 命中；
@@ -108,13 +149,10 @@ def _measure_texture(unreal, obj, tried):
             tried.append(name)
     # 5.4 真机实证：source (disk, memory)=未压缩 RGBA8 总量，不依赖编辑器上传时机；
     # Cube 无尺寸 API，只能由它反推。
-    try:
-        src_pair = obj.blueprint_get_texture_source_disk_and_memory_size()
-        m["source_disk_bytes"] = int(src_pair[0])
-        m["source_memory_bytes"] = int(src_pair[1])
-        tried.append("blueprint_get_texture_source_disk_and_memory_size")
-    except Exception:
-        pass
+    src_pair = _source_probe(obj, tried, probe_source=probe_source)
+    if src_pair:
+        m["source_disk_bytes"] = src_pair[0]
+        m["source_memory_bytes"] = src_pair[1]
     cs = _prop(obj, "compression_settings")
     if cs is not None:
         m["compression"] = str(cs)
@@ -212,7 +250,7 @@ def _material_slots_from_lods(lods):
     return max(secs) if secs else None
 
 
-def _measure_mesh(unreal, obj, tried):
+def _measure_mesh(unreal, obj, tried, probe_source=True):
     """返回 {"lods":[{"index","triangles"?,"sections"?}]} 或 None。"""
     nlods = None
     for name in ("get_num_lods",):
@@ -367,6 +405,20 @@ _MEASURERS = {
 }
 
 
+def _u_bool(value, default=True):
+    """总线/MCP 可能把 bool 送成字符串（"false"/"0"），显式归一，未知值走 default。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "y", "on"):
+        return True
+    if text in ("0", "false", "no", "n", "off", ""):
+        return False
+    return default
+
+
 def _as_path_list(value):
     """Normalize asset_paths into a list.
 
@@ -389,7 +441,7 @@ def _as_path_list(value):
 
 
 @register
-def get_asset_metrics(asset_paths=None, max_assets=20):
+def get_asset_metrics(asset_paths=None, max_assets=20, probe_source=True):
     """批量原始度量（纹理 px / 网格 LOD 三角）。items 逐项带 class/metrics/tried/note。"""
     paths = _as_path_list(asset_paths)
     requested = len(paths)
@@ -445,7 +497,7 @@ def get_asset_metrics(asset_paths=None, max_assets=20):
             item["note"] = "unmeasurable_class"
         else:
             measurable_seen += 1
-            m = measurer(unreal, obj, tried)
+            m = measurer(unreal, obj, tried, probe_source=_u_bool(probe_source))
             if m is None:
                 measurable_failed += 1
                 item["note"] = "all_candidates_failed"

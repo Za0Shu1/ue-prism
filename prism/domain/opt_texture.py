@@ -67,10 +67,10 @@ def _advice_for(entry):
     return "; ".join(bits)
 
 
-def _measure(unreal, obj, tried):
+def _measure(unreal, obj, tried, probe_source=True):
     """载入态度量（副作用仅为已载入资产）；失败返回 None 让上层记 load/unmeasurable。"""
     try:
-        return _m._measure_texture(unreal, obj, tried) or {}
+        return _m._measure_texture(unreal, obj, tried, probe_source=probe_source) or {}
     except Exception:
         return None
 
@@ -90,7 +90,8 @@ def _project_dir(unreal):
 @register
 def scan_texture_streaming(folder="/Game", map=None, paths=None, max_assets=200,
                            min_mb=4.0, top=25, px_warn=2048, px_error=4096,
-                           offset=0, tight_pct=80.0, min_demand_mb=32.0):
+                           offset=0, tight_pct=80.0, min_demand_mb=32.0,
+                           probe_source=True):
     """纹理流送池只读诊断（无副作用，除把资产载入编辑器内存）。
 
     返回：items（按 pool_mb 降序，cap=top）/ summary（streaming.aggregate 全量口径）/
@@ -99,12 +100,17 @@ def scan_texture_streaming(folder="/Game", map=None, paths=None, max_assets=200,
     pool（工程 ini 的 PoolSize 候选 + compare_pool 判定）/ sampling（窗口诚实标注）/
     total / truncated / cap / model（估算口径自解释）。
     无引擎时结构键常驻、note=no_engine。
+
+    probe_source=False 关掉源尺寸探针（见 metrics._source_probe 的引擎断言竞态）：
+    此时 source_width 退化为运行时有效边长，钳尺寸/超限判定偏保守，sampling.source_probe
+    与 note 会显式播报，不会静默给"看着更小"的收益。
     """
     top = max(1, _int(top, 25))
     max_assets = max(1, _int(max_assets, 200))
     min_mb = _flt(min_mb, 4.0)
     px_warn = _int(px_warn, 2048)
     px_error = _int(px_error, 4096)
+    probe_source = _m._u_bool(probe_source, True)
     resolved = _u.resolve_targets(paths=paths, folder=folder, map_path=map,
                                   terms=_u.TEXTURE_TERMS, limit=max_assets, offset=offset)
     result = {
@@ -134,7 +140,7 @@ def scan_texture_streaming(folder="/Game", map=None, paths=None, max_assets=200,
             entries.append({"package": target["package"], "class": target["class"],
                             "runtime_mb": 0.0, "actions": [], "flags": ["load_failed"]})
             continue
-        metrics = _measure(unreal, obj, tried)
+        metrics = _measure(unreal, obj, tried, probe_source=probe_source)
         if metrics is None:
             unmeasured += 1
             continue
@@ -148,6 +154,11 @@ def scan_texture_streaming(folder="/Game", map=None, paths=None, max_assets=200,
     summary["load_failed"] = unmeasured
     result["summary"] = summary
     result["sampling"]["measured"] = summary["measured"]
+    result["sampling"]["source_probe"] = "on" if probe_source else "off"
+    if not probe_source:
+        result["note"] = ((result.get("note") or "") +
+                          " 已关源尺寸探针（避开引擎重压缩断言竞态）：source_width 退化为"
+                          "运行时有效边长，钳尺寸收益偏保守。").strip()
     result["tried"] = tried[-40:]
 
     keep = [e for e in entries

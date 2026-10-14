@@ -187,7 +187,7 @@ def _as_path_list(value):
     return [t for t in (str(x).strip() for x in seq) if t]
 
 
-def get_asset_metrics(asset_paths: Annotated[str, Field(description="多个 /Game 路径，支持逗号/分号/换行分隔")], max_assets: Annotated[int, Field(description="本次最多载入编辑器内存的资产数（保持小值）")] = 20, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+def get_asset_metrics(asset_paths: Annotated[str, Field(description="多个 /Game 路径，支持逗号/分号/换行分隔")], max_assets: Annotated[int, Field(description="本次最多载入编辑器内存的资产数（保持小值）")] = 20, probe_source: Annotated[bool, Field(description="是否调引擎源尺寸探针（默认 true=探，source_width 取源侧真值）。批量写后紧贴着重扫可置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）；关掉后 sampling.source_probe=off、判定退化为运行时边长")] = True, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """Batch raw asset metrics via bridge (texture px / mesh LOD triangles), with tried/api evidence.
 
     每项附源盘大小(disk_bytes/disk_mb)与真大/假大判定：runtime_verdict
@@ -199,7 +199,8 @@ def get_asset_metrics(asset_paths: Annotated[str, Field(description="多个 /Gam
     if err:
         return err
     return bus.BusClient(bus_dir, timeout=bus.DEFAULT_TIMEOUT).call(
-        "get_asset_metrics", {"asset_paths": _as_path_list(asset_paths), "max_assets": int(max_assets)})
+        "get_asset_metrics", {"asset_paths": _as_path_list(asset_paths), "max_assets": int(max_assets),
+         "probe_source": _as_bool(probe_source, True)})
 
 
 def scan_orphan_assets(folder: Annotated[str, Field(description="扫描范围，Content 下目录前缀（默认 /Game）")] = "/Game", limit: Annotated[int, Field(description="本窗口最多检查的资产数")] = 2000, offset: Annotated[int, Field(description="分页偏移")] = 0, max_orphans: Annotated[int, Field(description="孤儿输出上限（按 size 降序截断）")] = 200, recent_days: Annotated[int, Field(description="近 N 天有改动的标记 suspect（删除前须二次校验）")] = 14, cascade: Annotated[bool, Field(description="true=追加级联可回收上限（仅被孤儿引用的依赖）")] = True, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
@@ -624,7 +625,7 @@ def _bool_opt(name, value, default):
         return None, envelope.make_err(envelope.Code.RUNTIME_ERROR, str(exc))
 
 
-def scan_texture_streaming(folder: Annotated[str, Field(description="Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包取纹理（如 /Game/Main_City）")] = None, paths: Annotated[str | None, Field(description="只查这些纹理（逗号/分号/换行分隔；给了就忽略 folder/map）")] = None, max_assets: Annotated[int, Field(description="本窗口最多度量多少张（按磁盘体量降序）；载入编辑器内存有代价")] = 200, min_mb: Annotated[float, Field(description="单张运行时估算低于此 MB 且无收益则不列进 items（仍计入 summary）")] = 4.0, top: Annotated[int, Field(description="items 返回条数上限")] = 25, offset: Annotated[int, Field(description="分页偏移（按体量降序窗口）")] = 0, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+def scan_texture_streaming(folder: Annotated[str, Field(description="Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包取纹理（如 /Game/Main_City）")] = None, paths: Annotated[str | None, Field(description="只查这些纹理（逗号/分号/换行分隔；给了就忽略 folder/map）")] = None, max_assets: Annotated[int, Field(description="本窗口最多度量多少张（按磁盘体量降序）；载入编辑器内存有代价")] = 200, min_mb: Annotated[float, Field(description="单张运行时估算低于此 MB 且无收益则不列进 items（仍计入 summary）")] = 4.0, top: Annotated[int, Field(description="items 返回条数上限")] = 25, offset: Annotated[int, Field(description="分页偏移（按体量降序窗口）")] = 0, probe_source: Annotated[bool, Field(description="是否调引擎源尺寸探针（默认 true=探，source_width 取源侧真值）。批量写后紧贴着重扫可置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）；关掉后 sampling.source_probe=off、判定退化为运行时边长")] = True, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
     """纹理流送池只读诊断（TODO Feature 1a）。Needs live bridge.
 
     按 folder / 关卡闭包 / 显式 paths 枚举纹理，逐张给全链运行时估算并归入
@@ -639,7 +640,8 @@ def scan_texture_streaming(folder: Annotated[str, Field(description="Content 下
     return bus.BusClient(bus_dir, timeout=240).call(
         "scan_texture_streaming",
         {"folder": folder, "map": map, "paths": paths, "max_assets": int(max_assets),
-         "min_mb": float(min_mb), "top": int(top), "offset": int(offset)})
+         "min_mb": float(min_mb), "top": int(top), "offset": int(offset),
+         "probe_source": _as_bool(probe_source, True)})
 
 
 def opt_texture_set_virtual(paths: Annotated[str | None, Field(description="要改的纹理（逗号/分号/换行分隔）；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围：Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, limit: Annotated[int, Field(description="本窗口最多处理多少张（按体量降序）")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划（每张 before→after + 预计省多少 MB），不写盘")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥（写操作契约）")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
