@@ -234,39 +234,36 @@ def _mesh_component(unreal, actor):
 
 
 def _override_count(unreal, actor, tried):
-    """材质覆盖数：只认"这个 Actor 自己改过的槽"，不认引擎代入的默认材质。
+    """材质覆盖数：只统计"和网格自身材质不一样"的槽。
 
-    5.4 真实工程两次踩点：
-      1) 数 `get_materials()` 长度 = 解析后的全部槽材质（含默认值）-> 无覆盖也报有覆盖；
-      2) 拿 `get_material(i)` 与网格 `static_materials[i].material_interface`（槽声明，
-         引擎 Cube 上是 None/DefaultMaterial）比对 -> 引擎把默认材质代入解析，1500 个
-         散装 Cube 全被误判成有覆盖，折叠闸门恒拒。
-    所以优先级：override_materials（字面意义上的覆盖数组）> 组件与网格双侧
-    `get_material(i)` 同口径比对 > 判不准返回 None（上层按未知记账并放行）。
+    5.4 真机三连踩点，口径演进：
+      1) 数 `get_materials()` 长度 = 解析后全部槽材质 -> 无覆盖也报有覆盖；
+      2) 组件解析值 vs 网格 `static_materials[i].material_interface`（槽声明）
+         -> 引擎 BasicShapes 槽声明为 None、解析时代入默认材质，误判；
+      3) 直接数 `override_materials` 里的非空项 -> 编辑器会把网格自身材质预填进
+         覆盖数组（1500 个散装 Cube 全"有覆盖"），还是误判。
+    正解：取候选材质（override_materials[i]，取不到再用组件 get_material(i)），
+    与网格自身材质（mesh.get_material(i)，取不到再用槽声明）比路径；
+    相等 = 没有偏离，不计；基线取不到 = 判不准，走 unknown 通道（放行 + 计数）。
     """
     comp = _mesh_component(unreal, actor)
     if comp is None:
         return None
-    direct, key, _sub = _u.get_prop_any(comp, ("override_materials",))
-    if direct is not None:
-        tried.append("override_materials:%s" % key)
-        try:
-            return sum(1 for m in list(direct) if m is not None)
-        except Exception:
-            return None
     mesh = _u.prop(comp, "static_mesh")
     if mesh is None:
         return None
+    direct, _key, _sub = _u.get_prop_any(comp, ("override_materials",))
     total = None
-    for call in (lambda: comp.get_num_materials(),
+    for call in (lambda: len(list(direct)) if direct is not None else None,
+                 lambda: comp.get_num_materials(),
                  lambda: len(comp.get_materials()),
                  lambda: int(mesh.get_num_sections(0))):
         try:
-            value = int(call())
+            value = call()
         except Exception:
             continue
         if value:
-            total = value
+            total = int(value)
             break
     if not total:
         tried.append("override_probe:slot_count_unreadable")
@@ -280,32 +277,56 @@ def _override_count(unreal, actor, tried):
         except Exception:
             return None
 
+    slot_defaults = None
+    if direct is not None:
+        tried.append("override_source:override_materials")
+    else:
+        tried.append("override_source:comp.get_material")
+
+    def mesh_base(index):
+        try:
+            value = mesh.get_material(index)
+        except Exception:
+            value = None
+        if value is not None:
+            return value
+        if slot_defaults is None:
+            return None
+        try:
+            return slot_defaults[index]
+        except Exception:
+            return None
+
+    defaults, _api, _sub2, unreadable = _u.mesh_materials(unreal, mesh)
+    slot_defaults = defaults if not unreadable else None
+
     hits = 0
     unknown = 0
     for index in range(total):
-        try:
-            on_comp = comp.get_material(index)
-        except Exception:
-            tried.append("override_probe:comp.get_material_unavailable")
-            return None
-        try:
-            on_mesh = mesh.get_material(index)
-        except Exception:
-            tried.append("override_probe:mesh.get_material_unavailable")
-            on_mesh = None
-        comp_path = path_of(on_comp)
-        mesh_path = path_of(on_mesh)
-        if on_comp is None:
+        candidate = None
+        if direct is not None:
+            try:
+                candidate = list(direct)[index]
+            except Exception:
+                candidate = None
+        if candidate is None:
+            try:
+                candidate = comp.get_material(index)
+            except Exception:
+                tried.append("override_probe:comp.get_material_unavailable")
+                return None
+        if candidate is None:
             continue
-        if mesh_path is None:
+        base = mesh_base(index)
+        base_path = path_of(base)
+        if base_path is None:
             unknown += 1
             continue
-        if comp_path != mesh_path:
+        if path_of(candidate) != base_path:
             hits += 1
     if hits == 0 and unknown:
-        tried.append("override_probe:%d/%d_slots_unreadable" % (unknown, total))
+        tried.append("override_probe:%d/%d_baseline_unreadable" % (unknown, total))
         return None
-    tried.append("override_probe:resolved_vs_mesh")
     return hits
 
 

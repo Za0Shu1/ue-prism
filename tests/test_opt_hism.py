@@ -176,12 +176,15 @@ class StaticMeshComponent(object):
     """
 
     def __init__(self, mesh, override=None, expose_overrides=True,
-                 resolved_default=None):
+                 resolved_default=None, prefill_default=False):
         self.static_mesh = mesh
         self._override = override
         self.resolved_default = resolved_default
         if expose_overrides:
-            self.override_materials = [override]
+            # 5.4 真机实况：编辑器会把网格自身材质预填进覆盖数组，非空 != 有偏离
+            filled = override if override is not None else (
+                mesh.default_mat if prefill_default else None)
+            self.override_materials = [filled]
 
     def get_class(self):
         return _Cls("StaticMeshComponent")
@@ -438,7 +441,7 @@ def _make_unreal(world, tmp_path):
 
 
 def _seed_world(cube=7, sphere=3, overrides=(), expose_overrides=True,
-                declares_none=False, resolved_default=None):
+                declares_none=False, resolved_default=None, prefill_default=False):
     world = _World()
     for i in range(cube):
         override = _MeshMat("/Game/Mats/M_Different") if "Cube_%d" % i in overrides else None
@@ -446,7 +449,8 @@ def _seed_world(cube=7, sphere=3, overrides=(), expose_overrides=True,
                                    [StaticMeshComponent(_MeshObj(CUBE, declares_none=declares_none),
                                                         override,
                                                         expose_overrides=expose_overrides,
-                                                        resolved_default=resolved_default)],
+                                                        resolved_default=resolved_default,
+                                                        prefill_default=prefill_default)],
                                    (float(i), 0.0, 0.0)))
     for i in range(sphere):
         world.actors.append(_Actor(world, "Sph_%d" % i, "StaticMeshActor",
@@ -548,7 +552,7 @@ def test_override_gate_uses_the_real_override_array_not_resolved_slots(monkeypat
     res = oh.opt_collapse_hism(min_count=5, limit=5)["result"]
     assert res["total"] == 1 and res["material_override_refused"] == 0
     assert res["groups"][0]["material_overrides"] == 0
-    assert "override_materials:override_materials" in res["tried"]
+    assert "override_source:override_materials" in res["tried"]
 
     dirty = _seed_world(cube=6, overrides={"Cube_2"})
     monkeypatch.setitem(sys.modules, "unreal", _make_unreal(dirty, tmp_path))
@@ -560,7 +564,7 @@ def test_override_gate_uses_the_real_override_array_not_resolved_slots(monkeypat
     same = _seed_world(cube=6, expose_overrides=False)
     monkeypatch.setitem(sys.modules, "unreal", _make_unreal(same, tmp_path))
     res3 = oh.opt_collapse_hism(min_count=5, limit=5)["result"]
-    assert res3["total"] == 1 and "override_probe:resolved_vs_mesh" in res3["tried"]
+    assert res3["total"] == 1 and "override_source:comp.get_material" in res3["tried"]
 
     engine_cube = _seed_world(cube=6, expose_overrides=False, declares_none=True,
                               resolved_default=_MeshMat("/Engine/EngineMaterials/WorldGridMaterial"))
@@ -568,7 +572,13 @@ def test_override_gate_uses_the_real_override_array_not_resolved_slots(monkeypat
     res4 = oh.opt_collapse_hism(min_count=5, limit=5)["result"]
     assert res4["total"] == 1, "引擎代入默认材质不等于美术覆盖，不得拒收整组"
     assert res4["material_override_unknown"] == 6
-    assert any("slots_unreadable" in t for t in res4["tried"])
+    assert any("baseline_unreadable" in t for t in res4["tried"])
+
+    prefilled = _seed_world(cube=6, prefill_default=True)
+    monkeypatch.setitem(sys.modules, "unreal", _make_unreal(prefilled, tmp_path))
+    res5 = oh.opt_collapse_hism(min_count=5, limit=5)["result"]
+    assert res5["total"] == 1, "覆盖数组被预填成网格自身材质，不算美术覆盖（真机 1500 Cube 实况）"
+    assert res5["refused_groups"] == []
 
 
 def test_collapse_refuses_when_hism_component_is_unreachable(monkeypatch, tmp_path):
