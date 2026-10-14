@@ -101,25 +101,19 @@ def _from_registry(unreal, ar, folder, terms, limit, offset):
     datas = _a._assets_under(ar, unreal, folder or "/Game")
     if datas is None:
         return None, 0, "get_assets_by_path 无候选签名命中（5.0-5.8 漂移？）"
+    # 一包一条：AssetRegistry 对多导出包（HLOD 烘焙图集/子资产）按导出返回多条，
+    # 不去重会让同包挤占 limit 窗口并重复度量（5.4 真实工程实测一个 HLOD 包占 48 格）。
     rows = []
-    for data in datas:
-        try:
-            pkg = _a._name_str(data.package_name)
-        except Exception:
-            continue
-        if not pkg:
-            continue
+    for pkg, data in _a._dedupe_by_package(datas, unreal, prefer_terms=terms):
         cls = _a._class_name(unreal, data)
         if not _class_match(cls, terms):
             continue
         _fp, size = _a._disk_size(unreal, pkg)
-        rows.append({"package": pkg, "class": cls, "disk_bytes": int(size or 0)})
+        rows.append({"package": pkg, "class": cls, "disk_bytes": int(size or 0),
+                     "object_path": _a._export_object_path(unreal, pkg, data)})
     rows.sort(key=lambda r: (-r["disk_bytes"], r["package"]))
     universe = len(rows)
     window = rows[max(0, int(offset)):max(0, int(offset)) + int(limit)]
-    for row in window:
-        leaf = row["package"].rpartition("/")[2]
-        row["object_path"] = row["package"] + "." + leaf
     return window, universe, ""
 
 

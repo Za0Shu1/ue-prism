@@ -775,6 +775,87 @@ def _has_primary_asset_id(unreal, data):
     return False
 
 
+def _export_object_name(unreal, data):
+    """AssetData 指向的**导出对象名**（不含包路径）。多签名兜底，取不到返回 ""。"""
+    for getter in (lambda: data.get_object_path(), lambda: getattr(data, "object_path", None)):
+        try:
+            op = getter()
+        except Exception:
+            continue
+        if op is None:
+            continue
+        s = ""
+        try:
+            inner = getattr(op, "asset_path", None)
+            if inner is not None:
+                s = _name_str(inner)
+        except Exception:
+            s = ""
+        if not s or s == "None":
+            s = _name_str(op)
+        if s and s != "None":
+            return s.rpartition(".")[2]
+    try:
+        name = getattr(data, "asset_name", None)
+        return _name_str(name) if name is not None else ""
+    except Exception:
+        return ""
+
+
+def _export_object_path(unreal, package, data):
+    """导出对应的对象路径。多导出包（HLOD/子资产）不能用 package.leaf 代表全部导出。"""
+    leaf = package.rpartition("/")[2]
+    return package + "." + (_export_object_name(unreal, data) or leaf)
+
+
+def _export_score(unreal, data, leaf, prefer_terms):
+    """同包多导出的代表度：类匹配 prefer_terms > 导出名==包名(主资产) > primary id > 有类名。"""
+    cls = _class_name(unreal, data) or ""
+    score = 0
+    low = cls.lower()
+    if prefer_terms and any(t in low for t in prefer_terms):
+        score += 8
+    if leaf and _export_object_name(unreal, data) == leaf:
+        score += 4
+    try:
+        if _has_primary_asset_id(unreal, data):
+            score += 2
+    except Exception:
+        pass
+    if cls:
+        score += 1
+    return score
+
+
+def _dedupe_by_package(datas, unreal, prefer_terms=None):
+    """按包去重 -> [(package, AssetData)]，一包只留一条代表导出。
+
+    `get_assets_by_path` 对**多导出包**（HLOD 烘焙图集、子资产、Blueprint 生成类）按
+    *导出*返回多条 AssetData。不去重的实测后果（5.4 真实工程）：一个 HLOD 包以子导出
+    身份重复 48 次，把 limit=400 的纹理窗口吃掉 124 格、同包重复度量，还把子导出的类名
+    当成本包的类。给了 prefer_terms 就留"类匹配且最像主资产"的那条，配合
+    `_export_object_path` 让后续读写落在真正的导出对象上。
+    """
+    order = []
+    best = {}
+    for data in datas or []:
+        try:
+            pkg = _name_str(data.package_name)
+        except Exception:
+            continue
+        if not pkg:
+            continue
+        leaf = pkg.rpartition("/")[2]
+        score = _export_score(unreal, data, leaf, prefer_terms)
+        cur = best.get(pkg)
+        if cur is None:
+            best[pkg] = (score, data)
+            order.append(pkg)
+        elif score > cur[0]:
+            best[pkg] = (score, data)
+    return [(pkg, best[pkg][1]) for pkg in order]
+
+
 def _cascade_killset(ar, unreal, seed, max_nodes=2000):
     """级联可回收上限: 从『种子孤儿』做不动点扩散, 找出**仅被这批孤儿引用**的依赖包。
     删掉种子孤儿后, 这些依赖会变成无人引用的二级孤儿 -> 一并可回收。
@@ -875,14 +956,8 @@ def scan_orphan_assets(folder="/Game", limit=2000, offset=0, max_orphans=200, re
         return envelope.make_err(envelope.Code.UE_API_MISMATCH,
                                  "get_assets_by_path: no candidate signature matched (5.0-5.8 drift?)")
 
-    entries = []
-    for d in datas:
-        try:
-            pkg = _name_str(d.package_name)
-        except Exception:
-            continue
-        if pkg:
-            entries.append((pkg, d))
+    # 一包一条（多导出包按导出返回多条，见 _dedupe_by_package）。
+    entries = _dedupe_by_package(datas, unreal)
     entries.sort(key=lambda t: t[0])
     total_all = len(entries)
     result["total_available"] = total_all
