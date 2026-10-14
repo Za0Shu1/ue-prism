@@ -66,10 +66,40 @@ def _is_instanced_comp(comp):
     return ("Instanced" in cls or "Foliage" in cls or "Niagara" in cls)
 
 
+def _has_instanced_component(unreal, actor):
+    """Actor 身上有没有 ISM/HISM/Foliage 这类合批组件（不看 Actor 类名）。
+
+    5.4 真机里没有 AHierarchicalStaticMeshActor：折叠容器就是"裸 AActor + HISM 根
+    组件"（引注自己的实例化工具同款）。只按 Actor 类名判会把折好的容器漏成
+    "无网格 Actor"，合批账数不到自己头上，也就无法自证"折过了"。
+    """
+    try:
+        root = actor.get_editor_property("root_component")
+    except Exception:
+        root = None
+    if root is not None and _is_instanced_comp(root):
+        return True
+    for getter in (lambda: actor.get_components_by_class(unreal.ActorComponent),
+                   lambda: unreal.SystemLibrary.get_components_by_class(
+                       actor, unreal.ActorComponent)):
+        try:
+            comps = getter()
+        except Exception:
+            continue
+        if comps is None:
+            continue
+        for comp in comps:
+            if comp is not None and _is_instanced_comp(comp):
+                return True
+        return False
+    return False
+
+
 def _mesh_probe(unreal, actor, cls):
     """返回 (mesh_package_path 或 None, instanced 布尔)。只认 StaticMesh 系 actor。"""
     if "StaticMesh" not in cls and "SkeletalMesh" not in cls:
-        return None, False
+        # 裸 Actor + HISM 根组件也算"已实例化"，见 _has_instanced_component
+        return None, _has_instanced_component(unreal, actor)
     for getter in (lambda: actor.get_components_by_class(unreal.StaticMeshComponent),
                    lambda: unreal.SystemLibrary.get_components_by_class(
                        actor, unreal.StaticMeshComponent)):

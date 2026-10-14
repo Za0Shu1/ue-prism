@@ -76,3 +76,20 @@ def test_summary_does_not_duplicate_groups():
     r = oi.analyze_instancing()
     assert "groups" not in r["summary"]              # 明细只在外层出现一次
 
+
+
+
+def test_group_rows_counts_component_instancing_without_a_telling_class():
+    """5.4 折叠容器是裸 Actor（类名里没 Instanced）：只能靠组件侧的名单认领。
+
+    也锁住后向兼容：不传 instanced_names 时行为与早期一致，类名命中仍然算已实例化。
+    """
+    rows = [(None, "Actor", "P", "Actor_1"),
+            (None, "FoliageInstancedStaticMeshActor", "P", "Foliage_2")]
+    out = oi._group_rows(rows, min_count=5)
+    assert out["excluded_instanced_actors"] == 1
+    assert out["excluded_no_mesh_actors"] == 1
+    out2 = oi._group_rows(rows, min_count=5, instanced_names=("Actor_1",))
+    assert out2["excluded_instanced_actors"] == 2
+    assert out2["excluded_no_mesh_actors"] == 0
+    assert out2["plain_staticmesh_actors"] == 0

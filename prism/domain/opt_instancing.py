@@ -23,7 +23,7 @@ def _int(value, default):
         return int(default)
 
 
-def _group_rows(rows, min_count=5, include_samples=10):
+def _group_rows(rows, min_count=5, include_samples=10, instanced_names=None):
     """[(mesh, class_name, level, actor_name)] -> 合批分组 + 排除统计（纯逻辑）。
 
     分组键 = 网格包路径（同网格 = 同材质槽布局，可共用一个 HISM）。
@@ -34,9 +34,13 @@ def _group_rows(rows, min_count=5, include_samples=10):
     excluded_instanced = 0
     excluded_no_mesh = 0
     plain_actors = 0
+    instanced_names = instanced_names or ()
     for mesh, cls, level, name in rows:
         if not mesh:
-            if cls and ("Instanced" in cls or "Foliage" in cls or "Niagara" in cls):
+            # 类名命中或组件命中（裸 Actor + HISM）都算已实例化宿主
+            if name in instanced_names or (cls and ("Instanced" in cls
+                                                    or "Foliage" in cls
+                                                    or "Niagara" in cls)):
                 excluded_instanced += 1
             else:
                 excluded_no_mesh += 1
@@ -140,6 +144,7 @@ def analyze_instancing(min_count=5, cap=40, include_samples=10, max_actors=5000,
 
     limit = _int(max_actors, 5000)
     rows = []
+    instanced_names = set()
     for actor in list(actors_all)[:limit]:
         try:
             cls = actor.get_class().get_name()
@@ -149,10 +154,14 @@ def analyze_instancing(min_count=5, cap=40, include_samples=10, max_actors=5000,
             continue
         if tag and not _ac._has_tag(actor, tag):
             continue
-        mesh, _inst = _ac._mesh_probe(unreal, actor, cls)
-        rows.append((mesh, cls, _ac._level_name(actor), actor.get_name()))
+        mesh, inst = _ac._mesh_probe(unreal, actor, cls)
+        name = actor.get_name()
+        if inst:
+            instanced_names.add(name)
+        rows.append((mesh, cls, _ac._level_name(actor), name))
 
-    summary = _group_rows(rows, min_count, include_samples)
+    summary = _group_rows(rows, min_count, include_samples,
+                          instanced_names=instanced_names)
     groups = summary.pop("groups")
     result["world_total_actors"] = len(actors_all)
     result["scanned"] = len(rows)
