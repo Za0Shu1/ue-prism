@@ -65,6 +65,7 @@ def _resolve(project=None, allow_stale=False):
 
     判定阶梯：project= 选择器 > 显式配置/默认 pin > 单一活跃工程自动 > 0/多 报错。
     点名 project 但注册表无匹配 -> PROJECT_NOT_FOUND（不再静默回落到默认 pin）。
+    点名命中但工程目录已不在盘上（注册表残留）-> PROJECT_NOT_FOUND 并回显缺失路径。
     allow_stale=True：默认“唯一工程”从全部注册工程里取（含编辑器已关），供 cook / 性能报告
     等“关编辑器 / 纯离线”场景；False：只看活跃工程（桥工具）。
     """
@@ -76,19 +77,28 @@ def _resolve(project=None, allow_stale=False):
                 "no registered project matches %r; registered=%s"
                 % (project, registry.names() or "[]"),
             )
+        if not entry.get("dir_exists"):
+            # 注册表残留（工程被删/整目录搬走）：别说“没见过”，要说“指针过期”
+            return None, None, envelope.make_err(
+                envelope.Code.PROJECT_NOT_FOUND,
+                "project %r is registered but its directory is gone: %s "
+                "(stale registry pointer - reopen or re-register that project; "
+                "see list_projects result.missing)"
+                % (project, entry.get("project_dir")),
+            )
         return entry["bus_dir"], entry["project_dir"], None
     if _has_explicit():
         b, p = _explicit()
         return b, p, None
-    pool = registry.discover() if allow_stale else registry.live_entries()
+    pool = registry.selectable() if allow_stale else registry.live_selectable()
     if len(pool) == 1:
         return pool[0]["bus_dir"], pool[0]["project_dir"], None
     if len(pool) == 0:
-        if not allow_stale and registry.discover():
+        if not allow_stale and registry.selectable():
             return None, None, envelope.make_err(
                 envelope.Code.NO_PROJECT,
                 "registered project(s) %s are offline (stale heartbeat); open the editor"
-                % registry.names(),
+                % registry.names(registry.selectable()),
             )
         return None, None, envelope.make_err(
             envelope.Code.NO_PROJECT,
@@ -423,21 +433,29 @@ def list_projects():
 
     Discovery source is the per-user registry dir written by the in-editor bridge; liveness
     is derived from each project's bus heartbeat freshness. Call this to pick a `project=` value.
+
+    `projects` only lists pointers whose project_dir still exists (those are the selectable
+    ones); leftover pointers for deleted/moved projects are reported in `missing` (+
+    `missing_count`) instead of being silently dropped or offered as targets.
     """
-    items = []
+    items, missing = [], []
     for e in registry.discover():
-        items.append({
+        row = {
             "name": e.get("name") or e.get("slug"),
             "project_dir": e.get("project_dir"),
             "bus_dir": e.get("bus_dir"),
             "ue_version": e.get("ue_version"),
             "live": bool(e.get("live")),
             "heartbeat_age": e.get("heartbeat_age"),
-        })
-    items.sort(key=lambda d: str(d.get("name") or ""))
+        }
+        (items if e.get("dir_exists") else missing).append(row)
+    key = lambda d: str(d.get("name") or "")
+    items.sort(key=key)
+    missing.sort(key=key)
     live = sum(1 for i in items if i["live"])
     return envelope.make_ok({
         "projects": items, "live": live,
+        "missing": missing, "missing_count": len(missing),
         "explicit_config": _has_explicit(),
         "total": len(items), "truncated": False, "cap": len(items),
     })

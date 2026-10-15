@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 
 from prism import bus, registry, server
@@ -120,3 +121,41 @@ def test_project_selector_not_found_beats_pin(monkeypatch, tmp_path):
     _register_live(tmp_path, "Real")
     _b, _p, err = server._resolve(project="Ghost")
     assert err is not None and err["error"]["code"] == "PROJECT_NOT_FOUND"
+
+def test_stale_pointer_excluded_from_autoselect(monkeypatch, tmp_path):
+    """注册表两个工程有一个目录没了 -> allow_stale 的“唯一工程”池只剩在盘的那个
+    （过去会把残留指针一起算进来，报 AMBIGUOUS_PROJECT 让人莫名其妙）。"""
+    _fresh_env(monkeypatch, tmp_path)
+    _register_live(tmp_path, "Alive")
+    proj_gone, _bdir = _register_live(tmp_path, "Gone")
+    shutil.rmtree(proj_gone)
+    _b, pd, err = server._resolve(project=None, allow_stale=True)
+    assert err is None and pd.endswith("Alive")
+
+
+def test_named_stale_pointer_reports_gone_directory(monkeypatch, tmp_path):
+    """点名残留工程 -> PROJECT_NOT_FOUND 且回显缺失路径，别说成“没见过这个工程”。"""
+    _fresh_env(monkeypatch, tmp_path)
+    proj_gone, _bdir = _register_live(tmp_path, "Gone")
+    shutil.rmtree(proj_gone)
+    _b, _p, err = server._resolve(project="Gone")
+    assert err is not None and err["error"]["code"] == "PROJECT_NOT_FOUND"
+    msg = err["error"]["message"]
+    assert "directory is gone" in msg and "Gone" in msg
+
+
+def test_list_projects_splits_missing_from_selectable(monkeypatch, tmp_path):
+    """list_projects：残留指针进 missing(+missing_count)，不进 projects；报告纪律照旧。"""
+    _fresh_env(monkeypatch, tmp_path)
+    _register_live(tmp_path, "Alive", age=0.0)
+    proj_gone, _bdir = _register_live(tmp_path, "Gone", age=10000.0)
+    shutil.rmtree(proj_gone)
+    env = server.list_projects()
+    assert env["ok"] is True
+    r = env["result"]
+    assert {d["name"] for d in r["projects"]} == {"Alive"}
+    assert r["total"] == 1 and r["cap"] == 1 and r["truncated"] is False
+    assert r["live"] == 1 and r["missing_count"] == 1
+    assert r["missing"][0]["name"] == "Gone"
+    assert r["missing"][0]["project_dir"] == proj_gone.replace("\\", "/")
+

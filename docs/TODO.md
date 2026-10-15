@@ -79,6 +79,19 @@
   1024MB（`resident_memory`），差 3 倍。根因：`texture_source_memory` 里 BPP/面数/mip 链三者耦合，
   非 2 的幂解也满足误差容限（`source_side_exact=false` 已如实标注，不算谎报）。修法要先造"已知边长
   的 Cube 真机靶"跨版本校准，属独立决策——本轮不动 `streaming` 数学，读数一律先看 `runtime_basis`。
+  2026-10-15 补跑矩阵时顺手取到一条对照数据，但**它证明不了 #11**：夹具的 `T_CalibHdr` 是 128 边长
+  立方图，5.3.2/5.4.4 两版都在热态量到 `runtime_basis=resident_memory`（实测 1.062MB=6×128²×8B×4/3，
+  `est_bc` 0.125MB、ratio 8.52），根本不走冷态反推那条歧路。要校准只能造**已知边长的大立方图靶**。
+  三个候选口径（等你拍）：
+  - **A 止血改口径（推荐先做，最便宜）**：Cube 在 `source_side_exact=false` 时不报边长——`source_width`
+    置 null + `size_basis=unresolved`，只报实测/占位账。代价是丢掉一个本来就不可信的数，收益是下游
+    不会再把 2365 当 4096 用（钳尺寸建议、`oversized_mip` 阈值判定都会跟着错）。纯 `streaming`/`metrics`
+    层改动 + L0 用例，不碰真机。
+  - **B 造已知边长的 Cube 真机靶**：跨版本校准反推（导入 cross 布局大图生成 TextureCube，或复制引擎里
+    已知边长的大立方图）。注意 5.3 Interchange 已实证会忽略 `destination_name`，造靶路径脆，需 5.3/5.4
+    各一次 L2 才能定候选。
+  - **C 直读源图头**：从 `source_disk_bytes` 对应的源数据（PNG IHDR / DDS header）解析真实边长。最准，
+    但要先实证 UE 存的 source 到底是不是原编码（5.3/5.4 可能不同），失败面最大。
 - **#12 5.3 导入器把 4K 大图自动开成 VT**（2026-10-15 补跑 5.3 时红两条：
   `streaming.clamp_target_planned` / `streaming.vt_write_blocks_cube`）：5.3 的 `UTextureImportSettings.AutoVTSize`
   让源像素 ≥ 4096×4096 的贴图一进工程就 `VirtualTextureStreaming=true`（5.4 起取消该行为），于是钳尺寸/VT
@@ -149,7 +162,7 @@
   `fix_broken_references` dry-run 把它们全路由进 `unfixable_missing`（无重定向桩可自动修）。
   手感：`sample_size=80` 在万级资产工程会系统性欠采样（`high_bpp` 全靠大资产度量面命中）。
 - 合并前：L0 全绿；触碰 unreal 真机路径的写入 → 至少一个引擎版本 L2 全 PASS。
-  **当前状态：L0 394 用例全绿（393 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
+  **当前状态：L0 398 用例全绿（397 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
   真折叠↔回滚往返）→ 跨版本矩阵两列达标；仍欠 5.5/5.8/5.1（本机无引擎）。可合并，发版仍需用户明确授权。**
 
 ## 里程碑

@@ -44,6 +44,8 @@ prism setup --client codex        # codex / opencode / cursor / claude / claude-
 
 同时开多个工程时，agent 先 `list_projects` 看谁在线；调用工具带 `project=<工程名>` 指定（可用 name、文件夹名或路径子串）。只有一个活跃工程时会自动连。
 
+工程被删除或整个目录搬走后，注册表会残留一条指针。`list_projects` 把它列在 `missing`（含 `missing_count`）而不是 `projects`——残留指针不会冒充可选工程，点名它会得到「directory is gone」并回显缺失路径。
+
 ## 常见问题
 
 - **看不到工具 / 启动失败**：多半 `mcp` 没装进当前 Python，或 MCP SDK 版本不符。终端自检 `python -m prism.server --help`。

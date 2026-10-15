@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 
 from prism import bus, registry
@@ -118,3 +119,17 @@ def test_reproject_rename_purges_orphan_pointer(tmp_path, monkeypatch):
     disc = registry.discover()
     assert len(disc) == 1 and disc[0]["name"] == "ProbeReal"
     assert registry.find("probeProj")["name"] == "ProbeReal"  # 文件夹名仍路由到这条唯一指针# 旧名孤儿已清
+
+def test_leftover_pointer_marked_not_selectable(tmp_path, monkeypatch):
+    """工程目录被删/搬走 -> 注册表残留：dir_exists=False，selectable/live_selectable 都不含它，
+    但 discover/missing_entries 照样列出（不静默丢，也不冒充可选工程）。"""
+    monkeypatch.setenv("PRISM_REGISTRY_DIR", str(tmp_path / "reg"))
+    proj, bdir = _mk(tmp_path, "Gone")
+    registry.register(bdir, proj, ue_version="5.4.4")
+    _heartbeat(bdir, age=0.0)
+    shutil.rmtree(proj)
+    disc = registry.discover()
+    assert len(disc) == 1 and disc[0]["dir_exists"] is False
+    assert registry.selectable() == [] and registry.live_selectable() == []
+    assert [e["project_dir"] for e in registry.missing_entries()] == [disc[0]["project_dir"]]
+

@@ -6,6 +6,8 @@
   · name = 该工程目录下唯一 *.uproject 的主干名（UE/用户都按它认工程）；无/多 .uproject 时回落目录名。
   · 文件名 = <slug>-<hash8(bus_dir)>，hash 由 bus_dir 定；注册时顺带清掉指向同一 bus_dir 的旧名孤儿。
 活性不写在这里（会陈旧失真），而是复用 bus_dir 下既有的 heartbeat.json —— server 读时现场算新鲜度。
+目录是否还在盘上(dir_exists)同样现场算：工程被删/整目录搬走后注册表会留下残留指针——标注它，
+别静默吞掉，也别让它冒充可选工程。
 本模块同时被 bridge（UE 内）import，故严格守 **3.7 子集**、只用标准库。
 """
 from __future__ import annotations
@@ -168,7 +170,13 @@ def _load_all():
 
 
 def discover(stale_seconds=None):
-    """所有指针 + 现场新鲜度。live = bus_dir 心跳年龄 < 阈值（复用 HB_STALE_SECONDS 语义）。"""
+    """所有指针 + 现场新鲜度 + 目录存活。
+
+    live = bus_dir 心跳年龄 < 阈值（复用 HB_STALE_SECONDS 语义）；
+    dir_exists = project_dir 还在盘上——工程被删/整目录搬走后注册表会留下**残留指针**，
+    它既不该被当成可选工程（选中就是一串莫名其妙的下游错误），也不该被静默吞掉
+    （list_projects 要如实播报）。本模块只标注，取舍交给调用方。
+    """
     if stale_seconds is None:
         stale_seconds = bus.HB_STALE_SECONDS
     res = []
@@ -177,12 +185,29 @@ def discover(stale_seconds=None):
         item = dict(e)
         item["live"] = (age is not None and age <= stale_seconds)
         item["heartbeat_age"] = age
+        pd = str(e.get("project_dir") or "")
+        item["dir_exists"] = bool(pd) and os.path.isdir(pd)
         res.append(item)
     return res
 
 
 def live_entries(stale_seconds=None):
     return [e for e in discover(stale_seconds) if e["live"]]
+
+
+def selectable(stale_seconds=None):
+    """目录仍在盘上的指针（编辑器可以已关）：残留指针不可选。"""
+    return [e for e in discover(stale_seconds) if e.get("dir_exists")]
+
+
+def live_selectable(stale_seconds=None):
+    """可选且活跃（心跳新鲜）：桥工具用它做“唯一活跃工程”自动回落。"""
+    return [e for e in selectable(stale_seconds) if e["live"]]
+
+
+def missing_entries(stale_seconds=None):
+    """残留指针（注册表里有、工程目录已不存在），供工具如实列出。"""
+    return [e for e in discover(stale_seconds) if not e.get("dir_exists")]
 
 
 def _identities(e):
@@ -195,7 +220,11 @@ def _identities(e):
 
 
 def find(project):
-    """按 name(.uproject名)/slug/工程目录名/完整路径匹配一条指针；唯一子串命中也算。返回带 live 的 dict 或 None。"""
+    """按 name(.uproject名)/slug/工程目录名/完整路径匹配一条指针；唯一子串命中也算。
+
+    返回带 live / dir_exists 的 dict 或 None。**目录已不存在的残留指针照样返回**——
+    由调用方（server._resolve）据此给“指针残留”而非“没听说过这个工程”的准确错误。
+    """
     if not project:
         return None
     low = str(project).strip().lower().replace("\\", "/")
