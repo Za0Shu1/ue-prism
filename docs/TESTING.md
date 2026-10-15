@@ -116,7 +116,7 @@
 
 ## v1.5 优化族的真机验收（5.3 / 5.4 均已跑）
 
-L0 416 用例（415 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
+L0 428 用例（427 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
 各 59/59 全 PASS**（2026-10-15，两具独立沙箱工程）。5.3 这一行照出一处只在跨版本时才会露脸的
 真值坑，产品代码不用改，改的是夹具：
 
@@ -154,6 +154,42 @@ python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor
   往 `optutil.base_material()` 补候选（属性名 `base_material` 已兜底）；读不到必须留 null 并红这项，
   不允许悄悄判 False。
 - `compose.instancing_groups` → 关卡没打开或 `get_all_level_actors` 签名漂移，看返回 note。
+
+## #11 B 冷态反推真值靶（`make_dds.py` + `probe_source_truth.py`）
+
+安全阀 A″ 只挡「无可信解」（`source_side_exact=false`）；**伪精确**（exact=true 但边长错）
+必须拿**已知边长的源**才量得出来。DDS 的 DX10 头能把「边长 / 每像素字节数(BPT) / 面数」三件事
+一次钉死（PNG 不行——位深与通道数由导入器决定），于是真值由靶文件自己写出，不依赖引擎实现。
+
+跑法（任意引擎版本；只读度量 + 自清理。**不进 59 项门禁**：这些靶是未被引用的散装资产，
+并进夹具目录要把孤儿/引用类校验的真值集一并改掉；口径定了再并）：
+
+```bash
+UnrealEditor-Cmd.exe <uproject> -run=pythonscript \
+    -script=scripts/calib_fixture/probe_source_truth.py -stdout -unattended -nosplash
+# 可选：PRISM_PROBE_DDS=<源图目录> / PRISM_PROBE_OUT=<输出目录> / PRISM_PROBE_KEEP=1
+```
+
+UE 5.4.4 与 5.3.2 各跑一次，**每个测量键逐字节一致**（2026-10-15）：
+
+| 靶 | authored 真值 | 引擎 source_memory | 冷态反推 | 判定 |
+|---|---|---|---|---|
+| `T_CalibF32` | 512 @16B/px | 4,194,304 ✓ | 1024 @4B，exact=true | **伪精确**：边长 ×2，金额照报（池 10.64MB vs 同档 512 真值口径 2.66MB） |
+| `T_CalibF16` | 512 @8B/px | 2,097,152 ✓ | 512 @8B，exact=true | 正确 |
+| `T_CalibRGBA8` | 1024 @4B/px | 4,194,304 ✓ | 1024 @4B，exact=true | 正确 |
+| `T_CalibR16` | 1024 @2B/px | 2,097,152 ✓ | 512 @8B，exact=true | **伪精确**：边长 ÷2 |
+| `T_CalibR8` | 1024 @1B/px | 1,048,576 ✓ | 512 @4B，exact=true | **伪精确**：边长 ÷2 |
+| `T_CalibCubeF32` | 256 @16B/px ×6 面 | 6,291,456 ✓（6 面全算） | 1254 @4B，exact=false | 安全阀生效：撤金额、留 `enable_vt` 动作（`vt_savings_mb=None`） |
+
+三条读数结论（数字由 `tests/test_fixture_dds.py` 12 用例离线锁定，不需要引擎也能复算）：
+
+- UE 把源位图**原样存进包内**：float 类 `source_disk_bytes == source_memory_bytes`，定点类只多几 K
+  序列化开销。所以「读 UE 存的源图头」拿不到 PNG/DDS 头——C 只能改读 SourceArtifacts 的外部原文件。
+- 歧义只出在 **BPT 不在 {4,8}** 的源上（候选顺序先试 4 再 8，等价类里 2 的幂解不止一个）：现状 6 张里 2 张正确。
+- 按直读的 `compression_settings` 给候选 BPP 排序（HDR 系先试 8→16）能把浮点类定住：现状 2/6 →
+  先验 3/6 → 先验 + 面数 4/6。剩下的 R8/R16 + `TC_DEFAULT` 两例与 RGBA8 的半尺寸**同解**，无旁证不可分
+  （真实工程里这类多半是 `TC_MASKS`，另按掩码系先验）。新口径等拍板；
+  `source_side_from_memory(bpp_candidates=...)` 形参就是为它留的口子。
 
 ## L2/L3 cook·package 全链路（`scripts/verify_cook_chain.py`）
 
@@ -216,7 +252,7 @@ HISM 折叠↔回滚）与 `verify_cook_chain`（cook 9 项 / package 10 项）�
 | `cook_package` / `get_cook_status`（cook+package） | test_cook(含 `test_package_command_template` package 模板)/ test_tasks | `--mode cook` 真机 9 项：uproject/编辑器关闭前置/dry 组装(+maps 定位)/双钥启动/状态收敛/succeeded(exit0)/cooked `CalibMap.umap` 落盘/`attribute_cook_errors` 0 错误组（UE5.4 实跑 BUILD SUCCESSFUL，695 包/0 error）。`--mode package` 真机 10 项：另走 `-build -cook -stage -pak -archive` 全链路，校验归档内 `.exe`+`.pak`（UE5.4 实跑 BUILD SUCCESSFUL/exit 0，exe+9.6MB pak 落盘/0 error 组；`--configuration Shipping` 另跑亦 10/10） | 跨版本 cook/package 兼容（5.3/5.8 各跑一次归档 matrix.json）；真实大工程 package 抽样 |
 | `preview_asset_migration` | test_migration_preview | - | - |
 | `migrate_asset_rename` / `_move` / `_asset`（写） | test_migrate / test_migrate_engine_shapes（双钥/dry_run/回滚/属性缺失形状） | migrate.rename_applies_redirect / rename_restored / move_applies / move_restored / copy_dryrun_plan / copy_applies / copy_conflict_refused（真机 rename_asset + 5.4 move→rename 兜底，内存态自还原；copy 走 `migrate_asset` duplicate 带走 uses 闭包 2 包 + 目标目录自动建 `make_directory`，内存态不落盘；每次跑用唯一 dest 并清理历史 `copy*` 残留，同名冲突必须结构化拒写） | 真实工程提交后引用复核；`fix_up_redirectors` 5.4 python 未绑定（诚实报告未确认清理，编辑器手动兜底） |
-| `scan_texture_streaming`（只读池诊断，probe_source 可关，安全阀见上） | test_streaming_model（42 用例：钳尺寸/VT 可行性/格式四分类 compressed-uncompressed-no_stream-high_bpp-unknown/`runtime_ledger` 实测优先不重复乘/两本账汇总封顶/池对照/ini 优先级/源边长安全阀 5 用例（撤金额留动作、实测仍报价、缺键不挡、汇总不确定度）/反推边长等价类审计 3 用例（exact=与 2 的幂先验自洽而非证明、答案必回算自洽、sqrt2 带可伪 exact）) + test_opt_texture（降级结构键含 high_bpp、cap 与窗口独立、`_advice_for` 不印 None 金额） | streaming.clamp_target_planned / clamped_texture_not_reflagged / editoricon_is_permanent_not_uncompressed / vt_skip_cube / hdr_bucketed_high_bpp / hdr_runtime_not_bc_estimate / hdr_measured_not_multiplied_again / hdr_metrics_and_scan_same_ledger / hdr_not_auto_recompressed / summary_separates_ledgers / summary_counts_high_bpp / pool_ini_read / enumerate.scan_one_row_per_package / enumerate.opt_rows_unique_and_measurable | **冷态大立方图的反推歧义率没有真机靶**（#11 B 待做：造已知边长的 Cube 靶跨版本校准）；真实大工程的 `est_runtime` 与实测显存偏差；池需求上界 vs 实际驻留的手感（5.4 真实工程：抽样 140 张纹理池需求上界 4.2GB，其中 7 张 TC_HDR 立方图占 1.8GB） |
+| `scan_texture_streaming`（只读池诊断，probe_source 可关，安全阀见上） | test_streaming_model（42 用例：钳尺寸/VT 可行性/格式四分类 compressed-uncompressed-no_stream-high_bpp-unknown/`runtime_ledger` 实测优先不重复乘/两本账汇总封顶/池对照/ini 优先级/源边长安全阀 5 用例（撤金额留动作、实测仍报价、缺键不挡、汇总不确定度）/反推边长等价类审计 3 用例（exact=与 2 的幂先验自洽而非证明、答案必回算自洽、sqrt2 带可伪 exact） + test_fixture_dds（12 用例：DDS 已知真值靶字节布局 + 5.3/5.4 实测反推快照锁，含「伪精确仍报价」）) + test_opt_texture（降级结构键含 high_bpp、cap 与窗口独立、`_advice_for` 不印 None 金额） | streaming.clamp_target_planned / clamped_texture_not_reflagged / editoricon_is_permanent_not_uncompressed / vt_skip_cube / hdr_bucketed_high_bpp / hdr_runtime_not_bc_estimate / hdr_measured_not_multiplied_again / hdr_metrics_and_scan_same_ledger / hdr_not_auto_recompressed / summary_separates_ledgers / summary_counts_high_bpp / pool_ini_read / enumerate.scan_one_row_per_package / enumerate.opt_rows_unique_and_measurable | #11 B1 已量（`probe_source_truth`：5.3.2/5.4.4 逐字节一致，6 靶里 3 张伪精确、1 张阀生效）；仍欠 B2 真 Cube 面数语义（需在真实工程只读复测 hDRI 那一张）；真实大工程的 `est_runtime` 与实测显存偏差；池需求上界 vs 实际驻留的手感（5.4 真实工程：抽样 140 张纹理池需求上界 4.2GB，其中 7 张 TC_HDR 立方图占 1.8GB） |
 | `opt_texture_set_virtual` / `opt_texture_clamp_max_size` / `opt_texture_set_compression`（写·双钥） | test_opt_texture(+双钥/字符串 bool 归一/负 max_size/建议文案/high_bpp 闸门/别名解析/同名格式 no_op + `_enum_member` 文本形态 + `_clamp_decision` 安全阀 4 用例(撤金额留计划/no_op 提示复测/widen 不编代价/可信照报价) + `_acc_savings` 撤回金额不进两本账) + test_opt_server_contract(脏 bool 不建客户端/export 原子写) | streaming.clamp_dry_run_does_not_write / clamp_write_honest / clamp_readback_from_disk / clamp_restored_for_next_run / vt_write_blocks_cube / compression.already_target_is_no_op / conservative_gate_still_blocks_high_bpp | 重压缩时机与盘上体积回落（改压缩需编辑器重压缩，cook 前磁盘不变）；`bUsedWithVT` 需工程开 VT 才有真收益；TC_HDR 需 `only_uncompressed=False` 才动（默认挡在闸门外） |
 | `scan_nanite_candidates`（只读） | test_opt_nanite（27 用例：分类六态 + 降级键常驻 + `base_material()` 三态解包 + 材质清单非 null） | nanite.target_blocked_before_write / conflict_detected / material_usage_readable_via_base_material / material_instance_usage_not_null | 真实高模候选阈值手感（`min_triangles`）；真实工程某网格 5 材质经 `get_base_material()` 全部读到确定值 |
 | `opt_mesh_set_nanite` / `fix_nanite_translucent`（写·双钥） | test_opt_nanite（三条版本签名钉死 + 写不进必须 failed + 半透明拦截 + blend_mode 读不到保守跳过） | nanite.skip_translucent_blocks / force_write_honest / fix_write_honest / self_restored | 材质 `bUsedWithNanite` 只报不改（动材质另议）；真实工程警告回落抽检 |
