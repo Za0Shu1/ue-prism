@@ -116,7 +116,7 @@
 
 ## v1.5 优化族的真机验收（5.3 / 5.4 均已跑）
 
-L0 430 用例（429 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
+L0 436 用例（435 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
 各 59/59 全 PASS**（2026-10-15，两具独立沙箱工程）。5.3 这一行照出一处只在跨版本时才会露脸的
 真值坑，产品代码不用改，改的是夹具：
 
@@ -195,6 +195,29 @@ UE 5.4.4 与 5.3.2 各跑一次，**每个测量键逐字节一致**（2026-10-1
 - slice 数不可直读（探针 `api_surface` 已固化该负结论，复跑即得）：DDS 立方图落 `Texture2DArray`
   类，5.4 类级成员 78 个、5.3 69 个，无 array/slice/dim 成员，`blueprint_get_size_x/y` 也只有
   Texture2D 才有 -> 面数口径（B2）只能等真实工程只读复测，不是换 API 能撞出来的。
+
+
+## #11 C 源信息可达性探针（`source_scan.py` + `probe_source_artifacts.py`）
+
+B1 之后 C（"直读源图拿真边长"）剩的问题只有一个：源图的**真宽高到底还留在哪**。探针把 DDS
+靶导入后三个面同时取证（5.3.2 与 5.4.4 结论完全一致，两版均自清理 6/6）：
+
+- **包内：死路**。uasset 字节里 PNG/JPEG/BMP/DDS 签名零命中（6 张全 0），名字表痕迹只有
+  `AssetImportData`——与 B1「存的是裸位图」吻合。判据 `source_scan.py` 纯 stdlib（签名 +
+  结构自洽校验），由 `tests/test_source_scan.py` 6 用例离线锁定：认得合成真头、拒绝声明尺寸
+  自相矛盾的 BMP、64KB 种子噪声零误报、截断不越界不崩。
+- **import 元数据：可用的那条**。`get_editor_property("asset_import_data")` 返回
+  `InterchangeAssetImportData`，其 `extract_filenames()/get_first_filename()`（含 script_ 同义
+  变体）给出导入时记录的**原始文件绝对路径**。原文件在场 -> 读容器头拿真宽高/面数并与
+  `src_mem` 乘积互验；不在场 -> 静默跳过。C 的失败面由此缩到「美术是否保留原文件于记录路径」。
+- **注册表/`_Source` 对象：不存在**。`<Name>_Source` 在 registry 与 load 面都拿不到；
+  `AssetData` 的 Python 面（5.4）没有 `get_export_name`，判存在要用 `is_valid()`。
+
+跑法与 truth 探针同（`-run=pythonscript -script=...probe_source_artifacts.py`，
+`PRISM_PROBE_DDS/OUT/KEEP` 同语义），产出 `probe_source_artifacts.json`。
+真机坑已钉进代码：5.4 下 python 仍持有最后一次 obj/子对象引用时 `delete_asset` 会在
+`ObjectTools::GatherObjectReferencersForDeletion` 空指针崩掉编辑器——清理前必须释放引用并
+`gc.collect()`（探针已这么做，之后 6/6 干净）；将来的产品删除逻辑同理。
 
 ## L2/L3 cook·package 全链路（`scripts/verify_cook_chain.py`）
 
@@ -371,4 +394,6 @@ PRISM_FIXTURE_RESET_MAP=1 ... --skip-assets  # 地图只数量不对时强制重
 - 工程 ini 没写 `r.Streaming.PoolSize` 时 `verdict=unknown`：建议人工设一个上限，否则溢不溢根本无从判定。
 - 重量口（循环验收用）：`scan_texture_streaming` 的 `probe_source=True` 会把资产装进内存，
   **批量写完不要立刻重测**（引用冷热态交错时会把编辑器拖崩）；要快就用 `probe_source=False`。
+
+
 
