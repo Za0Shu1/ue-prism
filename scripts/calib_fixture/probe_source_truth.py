@@ -18,7 +18,8 @@
           PRISM_PROBE_OUT=<输出目录>（默认与源图目录同处）
           PRISM_PROBE_KEEP=1（测完保留导入的资产；默认删除，异常退出也会删）
 产出：probe_source_truth.json + 引擎日志里的 PROBE 表（commandlet 下 print 不入日志，
-所以日志一律走 unreal.log）。
+所以日志一律走 unreal.log）。另附每个靶的类级成员面枚举（api_surface），用于复核
+「slice 数在 Python 面上根本不可读」这条负结论——它是 faces 口径不能单改的依据。
 """
 import json
 import os
@@ -95,6 +96,32 @@ def _import_target(path, name):
         return False, (note + " does_asset_exist:%r" % (exc,))
 
 
+def _api_surface(pkg):
+    """类级成员枚举：slice / 面尺寸到底在不在引擎暴露的 Python 面上。
+
+    DDS 立方图实测：导入后类是 Texture2DArray，5.3.2 69 个成员 / 5.4.4 78 个，
+    无 array/slice/dim 成员，尺寸成员也没有 blueprint_get_size_x/y（只有
+    Texture2D 暴露）-> 面数(array_size)在域层无从直读，faces 口径不能单改。
+    原生 TextureCube 类的读数属 B2 待复测问题，本探针不覆盖、不下负结论。
+    """
+    try:
+        obj = unreal.load_asset(pkg)
+        if obj is None:
+            return {"note": "load_failed"}
+        names = [n for n in dir(type(obj)) if not n.startswith("_")]
+        low = [n.lower() for n in names]
+        return {
+            "pytype": type(obj).__name__,
+            "members": len(names),
+            "array_members": [names[i] for i, n in enumerate(low)
+                               if any(k in n for k in ("array", "slice", "dim"))],
+            "size_members": [names[i] for i, n in enumerate(low)
+                             if "size" in n and "mip" not in n],
+        }
+    except Exception as exc:
+        return {"note": "err:%r" % (exc,)}
+
+
 def _dump(res, out_path):
     try:
         d = os.path.dirname(out_path)
@@ -152,6 +179,11 @@ def _report(res):
             "%s/%s" % (r.get("faces_used_by_product"), r["authored_faces"]),
             "%s@%s" % (r.get("derived_side"), r.get("derived_bpt")),
             str(r.get("derived_exact")), str(r.get("size_basis")), str(r.get("side_match"))))
+    for r in res["targets"]:
+        api = r.get("api_surface") or {}
+        _say("  API %-15s pytype=%-14s members=%s array=%s size=%s" % (
+            r["name"], api.get("pytype"), api.get("members"),
+            api.get("array_members") or "none", api.get("size_members") or "none"))
     done = [r for r in res["targets"] if r.get("derived_side") is not None]
     _say("SUMMARY engine=%s targets=%d measured=%d srcmem_exact=%d side_match=%d "
          "pseudo_exact=%d valve_fired=%d" % (
@@ -209,6 +241,7 @@ def _main():
             except Exception as exc:
                 res["errors"].append("measure %s: %r" % (row["name"], exc))
                 row["measure_failed"] = True
+            row["api_surface"] = _api_surface(FOLDER + "/" + row["name"])
         _dump(res, out_path)
         _report(res)
     finally:

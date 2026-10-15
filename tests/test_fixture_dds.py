@@ -195,9 +195,9 @@ HDR_ORDER = (8, 16, 4, 2, 1, 32, 64)          # 直读 compression_settings 后�
 
 
 def test_bpp_prior_by_compression_fixes_float_and_multiface():
-    """B 的可选增益（等拍板）：HDR 系先试 8/16 就能定住浮点源边长。
+    """工具面事实：bpp_candidates 覆盖顺序能定住浮点源边长（方案 1 作为产品已否决，见文末反证）。
 
-    现状 2/6 -> 先验 3/6 -> 先验+面数 4/6；单通道 + TC_DEFAULT 两例仍歧义
+    计数口径（工具面复算，非建议）：现状 2/6 -> 先验 3/6 -> 先验+面数 4/6；单通道 + TC_DEFAULT 仍歧义
     （它们的总量与 RGBA8 的半尺寸完全同解，无头信息可分）。
     """
     assert st.source_side_from_memory(MEASURED["T_CalibF32"]["src_mem"], 1,
@@ -222,3 +222,47 @@ def test_prior_would_move_the_money_on_the_f32_case():
                                       bpp_candidates=HDR_ORDER)
     assert bad[0] == 1024 and good[0] == 512
     assert (bad[0] ** 2) / float(good[0] ** 2) == 4.0
+
+# ---- 方案 1（compression 先验）反证：钉死"先验作为产品改动净亏"的两组实测数字 ----
+
+# 夹具 T_CalibHdr 的源真值（5.3/5.4 与 59 项夹具同源）：引擎 TextureCube 副本，
+# 源 6x128^2x4B；标 TC_HDR 但源是 8-bit——真实工程"标 HDR 的立方图"常见形态。
+HDR_CUBE_SRC_MEM = 393216
+
+
+def test_override_prior_flips_correct_answers_to_wrong():
+    """覆盖式先验把"现状正确"的靶推错——方案 1 否决的第一根钉子。
+
+    同一总量存在多个 2 的幂解时 source_memory 分不出真值，谁先试中谁成为
+    exact=True：4194304 = 1024^2x4 = 512^2x16；393216 = 6x128^2x4 = 6x64^2x16。
+    默认顺序先 4 恰好选对，HDR 先验先 8 再 16 就选错；且 compression 驱动的
+    设计必动 TC_HDR 家族，T_CalibHdr 首当其冲——修好 F32 一例、推错两例。
+    """
+    assert st.source_side_from_memory(4194304, 1)[:2] == (1024, 4)
+    assert st.source_side_from_memory(4194304, 1, HDR_ORDER)[:2] == (512, 16)
+    assert st.source_side_from_memory(HDR_CUBE_SRC_MEM, 6)[:3] == (128, 4, 6)
+    assert st.source_side_from_memory(HDR_CUBE_SRC_MEM, 6, HDR_ORDER) == (64, 16, 6, True)
+    moved = sorted(n for n, m in MEASURED.items()
+                   if st.source_side_from_memory(m["src_mem"], m["faces_used"],
+                                                 HDR_ORDER)[:2] !=
+                      st.source_side_from_memory(m["src_mem"], m["faces_used"])[:2])
+    assert moved == ["T_CalibCubeF32", "T_CalibF32", "T_CalibR8", "T_CalibRGBA8"]
+
+
+def test_fallback_only_prior_has_zero_gain_and_faces_fix_alone_backfires():
+    """fallback 式零增益、faces 单修反噬——方案 1 否决的第二根钉子。
+
+    实测面上默认顺序无解的只有 CubeF32（faces=1，slice 数在 5.3/5.4 不可直读：
+    类级成员枚举无 array/slice/dim，探针已固化该负结论），而 faces=1 的先验
+    照样无解 -> "默认失败才用先验"收益为 0。若只把 faces 修成 6 不动顺序，
+    CubeF32 会从诚实 unverified 翻成自信的 (512,4) 伪精确并照常报价。
+    面数与金额口径必须同批改，而两条路都堵死，故方案 1 整体否决。
+    """
+    no_exact = sorted(n for n, m in MEASURED.items()
+                      if not st.source_side_from_memory(m["src_mem"],
+                                                        m["faces_used"])[3])
+    assert no_exact == ["T_CalibCubeF32"]
+    assert st.source_side_from_memory(HDR_CUBE_SRC_MEM, 6)[3] is True
+    m = MEASURED["T_CalibCubeF32"]
+    assert st.source_side_from_memory(m["src_mem"], 1, HDR_ORDER) == (887, 8, 1, False)
+    assert st.source_side_from_memory(m["src_mem"], 6) == (512, 4, 6, True)
