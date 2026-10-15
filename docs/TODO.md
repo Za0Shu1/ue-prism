@@ -96,8 +96,21 @@
     L0 15 用例钉口径；L2 反向守卫进 `checks.py`（夹具都是 2 的幂靶，必须 `size_basis=source_exact`
     且照常报价、`size_unverified_count=0`）。
   - 本轮**不动 `source_side_from_memory` 数学**（宁可少报价，不可编金额）。
-  **仍欠 B**：冷态大立方图的反推歧义率没有真机靶 -> 造"已知边长的大 Cube 靶"跨版本校准
+  - 穷举审计（`test_source_side_exact_is_prior_consistency_not_proof` 等 3 用例钉住）给出残余边界：
+    `source_memory = side^2 x bpp x faces` 只定住乘积，`side x sqrt(bpp)` 才是被定住的量——
+    等价类里 2 的幂解不止一个（POT 真值取 32..65536 十二档 x 七档候选 BPP = 84 个组合全部
+    exact=true，其中 60 个会把边长挪到同族的另一点：真 FP32 2048 被认成 RGBA8 4096、真 R8 512
+    被认成 256）。所以
+    **`exact=true` 的语义是"与 2 的幂 + RGBA8 先验自洽"，不是"边长被证明"**；它保证的只有
+    "答案回算的源内存落在容差内"（总量账不跑偏），而按边长折算的比例收益仍可能偏。
+    另一个方向同样存在：非 POT 真边长落在 pow2/sqrt2 附近（2896、11585）时，2% 容差会让
+    另一档 BPP 的幂解通过校验 -> exact=true 而边长错 ~1.4 倍。候选集内不存在唯一解，
+    要把边长真正定死只能靠 B（真机靶校准歧义率）或 C（读源图头拿宽高）。
+  **仍欠 B**：冷态大立方图的反推歧义率没有真机靶 -> 造"已知边长的大 Cube/浮点源靶"跨版本校准
   （5.3 Interchange 已实证忽略 `destination_name`，造靶路径脆，需授权开真实工程或另想造靶途径）。
+  B 的可选增益（等拍板，本轮不动数学）：用直读的 `compression_settings` 给候选 BPP 排序加先验
+  （TC_HDR/浮点系优先 8/16，掩码系优先 1/2，其余仍 4 优先）——能压掉一部分等价类误判，
+  但它是新口径，必须先用 B 的真机靶量过再上。
   **C（备选）**：从 `source_disk_bytes` 对应的源数据（PNG IHDR / DDS header）直读边长——最准，
   但要先实证 UE 存的 source 是否原编码，失败面最大。读数口径仍提醒：冷热态敏感的结论先看
   `runtime_basis` 与 `size_basis`。
@@ -171,7 +184,7 @@
   `fix_broken_references` dry-run 把它们全路由进 `unfixable_missing`（无重定向桩可自动修）。
   手感：`sample_size=80` 在万级资产工程会系统性欠采样（`high_bpp` 全靠大资产度量面命中）。
 - 合并前：L0 全绿；触碰 unreal 真机路径的写入 → 至少一个引擎版本 L2 全 PASS。
-  **当前状态：L0 413 用例全绿（412 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
+  **当前状态：L0 416 用例全绿（415 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
   真折叠↔回滚往返，以及 #11 安全阀改动后的复跑）→ 跨版本矩阵两列达标；仍欠 5.5/5.8/5.1（本机无引擎）。
   可合并，发版仍需用户明确授权。**
 

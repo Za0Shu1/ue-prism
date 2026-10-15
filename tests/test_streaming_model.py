@@ -499,3 +499,40 @@ def test_aggregate_reports_size_uncertainty_and_withheld_quotes():
     assert agg["clamp_savings_mb"] == warm["clamp_savings_mb"]   # None 按 0 计入，不猜数
     assert agg["model"]["version"] == "v3-size-verification-aware"
     assert "size_verification" in agg["model"]
+
+
+# ---------- 反推边长的等价类真相：exact=true 保证什么、不保证什么（#11 残余）----------
+
+
+def test_source_side_exact_is_prior_consistency_not_proof():
+    """同一条 source_memory 对应一族 (边长, BPP)：S x sqrt(bpp) 是常数。
+    exact=true 的真实语义是"命中 2 的幂 + RGBA8 优先的先验"，不是"边长被证明"。
+    这组断言是给候选顺序/成本模型上锁的：动数学之前先让它变红，别顺手改出一个更顺眼的错数。
+    """
+    for side in (256, 1024, 2048, 4096):
+        for bpp in (4, 8):     # 源位图压倒多数是 RGBA8 / RGBA16(HDR)
+            assert st.source_side_from_memory(side * side * bpp, 1)[:2] == (side, bpp)
+    # 浮点/低位深源：先验会选中等价类里的另一点（总量仍自洽，边长翻倍/减半）
+    assert st.source_side_from_memory(2048 * 2048 * 16, 1) == (4096, 4, 1, True)
+    assert st.source_side_from_memory(512 * 512 * 1, 1) == (256, 4, 1, True)
+    assert st.source_side_from_memory(4096 * 4096 * 16 * 6, 6) == (8192, 4, 6, True)
+
+
+def test_source_side_answer_always_reproduces_source_memory():
+    """exact 唯一真能保证的事：答案回算的源内存必须落在容差内（总量账不会跑偏）。"""
+    for faces in (1, 6):
+        for bpp in st.SRC_BPP_CANDIDATES:
+            for side in (256, 1024, 2048, 4096, 3000, 2896):
+                total = side * side * bpp * faces
+                got_side, got_bpp, got_faces, _exact = st.source_side_from_memory(total, faces)
+                assert got_faces == faces, (faces, side, bpp)
+                err = abs(got_side * got_side * got_bpp * faces - total) / float(total)
+                assert err <= st.SRC_SIDE_TOLERANCE, (faces, side, bpp, got_side, got_bpp, err)
+
+
+def test_source_side_sqrt2_band_can_claim_exact_while_being_wrong():
+    """已知漏洞（如实钉住，留给 #11 B/C 收敛）：真源边长落在 pow2/sqrt2 附近时，
+    2% 容差会让另一档 BPP 的 2 的幂解通过校验 -> exact=true 而边长错 ~1.4 倍。
+    非 POT 源本来就少，但不是零（本文件尺寸建议用例里的 11585 就是这类 32K 级靶边长），所以冷态金额仍要复测。"""
+    assert st.source_side_from_memory(2896 * 2896 * 4, 1) == (2048, 8, 1, True)
+    assert st.source_side_from_memory(11585 * 11585 * 4, 1) == (8192, 8, 1, True)
