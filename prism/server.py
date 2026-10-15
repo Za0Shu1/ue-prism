@@ -626,7 +626,7 @@ def _bool_opt(name, value, default):
 
 
 def scan_texture_streaming(folder: Annotated[str, Field(description="Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包取纹理（如 /Game/Main_City）")] = None, paths: Annotated[str | None, Field(description="只查这些纹理（逗号/分号/换行分隔；给了就忽略 folder/map）")] = None, max_assets: Annotated[int, Field(description="本窗口最多度量多少张（按磁盘体量降序）；载入编辑器内存有代价")] = 200, min_mb: Annotated[float, Field(description="单张运行时估算低于此 MB 且无收益则不列进 items（仍计入 summary）")] = 4.0, top: Annotated[int, Field(description="items 返回条数上限")] = 25, offset: Annotated[int, Field(description="分页偏移（按体量降序窗口）")] = 0, probe_source: Annotated[bool, Field(description="是否调引擎源尺寸探针（默认 true=探，source_width 取源侧真值）。批量写后紧贴着重扫可置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）；关掉后 sampling.source_probe=off、判定退化为运行时边长")] = True, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """纹理流送池只读诊断（TODO Feature 1a）。Needs live bridge.
+    """纹理流送池只读诊断（v1.5 Feature 1a）。Needs live bridge.
 
     按 folder / 关卡闭包 / 显式 paths 枚举纹理，逐张给全链运行时估算并归入
     池内 / 池外常驻(never_stream) / 已虚拟化，汇出 pool_demand_mb 与三档收益
@@ -645,7 +645,7 @@ def scan_texture_streaming(folder: Annotated[str, Field(description="Content 下
 
 
 def opt_texture_set_virtual(paths: Annotated[str | None, Field(description="要改的纹理（逗号/分号/换行分隔）；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围：Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, limit: Annotated[int, Field(description="本窗口最多处理多少张（按体量降序）")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划（每张 before→after + 预计省多少 MB），不写盘")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥（写操作契约）")] = False, probe_source: Annotated[bool, Field(description="false=跳过引擎源尺寸探针（默认 true=探）。批量写后紧贴着重扫请置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）")] = True, list_cap: Annotated[int, Field(description="返回的 targets 行数上限（默认 80；0=不截断）。计划行按 change 优先排序，宽窗口核对候选时置 0 可拿全量")] = 80, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """批量开虚拟纹理（写·双钥；TODO Feature 1b）。Needs live bridge.
+    """批量开虚拟纹理（写·双钥；v1.5 Feature 1b）。Needs live bridge.
 
     Cube/Volume 不支持 VT -> skipped；已虚拟 -> no_op；属性写不进 -> failed + tried。
     工程需启用 VT（返回体 vt_enabled_project 给 ini 判定，None=没读到）。改完需保存，
@@ -667,7 +667,7 @@ def opt_texture_set_virtual(paths: Annotated[str | None, Field(description="要�
 
 
 def opt_texture_clamp_max_size(paths: Annotated[str | None, Field(description="要改的纹理；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围：Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, max_size: Annotated[int, Field(description="钳到的分辨率（0=取消限制，属放大动作，会显著提示）")] = 2048, only_if_larger: Annotated[bool, Field(description="默认 true=只对大于 max_size 的生效")] = True, limit: Annotated[int, Field(description="本窗口最多处理多少张")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, probe_source: Annotated[bool, Field(description="false=跳过引擎源尺寸探针（默认 true=探）。批量写后紧贴着重扫请置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）")] = True, list_cap: Annotated[int, Field(description="返回的 targets 行数上限（默认 80；0=不截断）。计划行按 change 优先排序，宽窗口核对候选时置 0 可拿全量")] = 80, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """批量钳 MaxTextureSize（写·双钥；TODO Feature 1b）。Needs live bridge.
+    """批量钳 MaxTextureSize（写·双钥；v1.5 Feature 1b）。Needs live bridge.
 
     降流送池压力最便宜的一刀：只改属性，不动源图。dry-run 给每张 before→after
     与 savings_mb；已达标/已在阈值内 -> no_op。改动需编辑器重压缩才反映到盘上。
@@ -690,7 +690,7 @@ def opt_texture_clamp_max_size(paths: Annotated[str | None, Field(description="�
 
 
 def opt_texture_set_compression(paths: Annotated[str | None, Field(description="要改的纹理；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选纹理")] = None, compression: Annotated[str, Field(description="目标格式友好名：default/normal/masks/editoricon（大小写与下划线不敏感）")] = "default", only_uncompressed: Annotated[bool, Field(description="默认 true=只动非工程运行时格式（真未压缩系 / EditorIcon 这类禁流送系）；格式文本判不准也不动")] = True, limit: Annotated[int, Field(description="本窗口最多处理多少张")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, probe_source: Annotated[bool, Field(description="false=跳过引擎源尺寸探针（默认 true=探）。批量写后紧贴着重扫请置 false，规避 5.4 已知引擎断言竞态（贴图重压缩中调 blueprint_get_texture_source_disk_and_memory_size 会崩编辑器）")] = True, list_cap: Annotated[int, Field(description="返回的 targets 行数上限（默认 80；0=不截断）。计划行按 change 优先排序，宽窗口核对候选时置 0 可拿全量")] = 80, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """批量改压缩格式（写·双钥；TODO Feature 1b 可选项）。Needs live bridge.
+    """批量改压缩格式（写·双钥；v1.5 Feature 1b 可选项）。Needs live bridge.
 
     两类非工程运行时格式，收益口径不同（结果里分行给 savings_mb）：
       * 未压缩/浮点系：按 4B/px 计，改 TC_Default 约省 3/4 池；
@@ -717,7 +717,7 @@ def opt_texture_set_compression(paths: Annotated[str | None, Field(description="
 
 
 def scan_nanite_candidates(folder: Annotated[str, Field(description="Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包取网格")] = None, paths: Annotated[str | None, Field(description="只查这些网格")] = None, min_triangles: Annotated[int, Field(description="低于此 LOD0 三角数算 low_complexity（默认 20 万，同 rules.mesh_tri warn）")] = 200000, max_assets: Annotated[int, Field(description="本窗口最多度量多少个网格")] = 200, top: Annotated[int, Field(description="items 返回条数上限")] = 40, offset: Annotated[int, Field(description="分页偏移")] = 0, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """Nanite 只读候选与冲突分析（TODO Feature 2a）。Needs live bridge.
+    """Nanite 只读候选与冲突分析（v1.5 Feature 2a）。Needs live bridge.
 
     分类：enable_candidate（高面数未开，材质不半透明）/ conflict_translucent
     （已开却挂半透明 = 静默降级 + 刷警告）/ blocked_translucent（半透明不建议开）/
@@ -734,7 +734,7 @@ def scan_nanite_candidates(folder: Annotated[str, Field(description="Content 下
 
 
 def opt_mesh_set_nanite(paths: Annotated[str | None, Field(description="要改的网格；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选网格")] = None, enabled: Annotated[bool, Field(description="true=开 Nanite，false=关")] = True, skip_translucent: Annotated[bool, Field(description="默认 true=挂半透明材质的网格不开（开了也静默降级+刷警告）")] = True, limit: Annotated[int, Field(description="本窗口最多处理多少个网格")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """批量开/关 Nanite（写·双钥；TODO Feature 2b）。Needs live bridge.
+    """批量开/关 Nanite（写·双钥；v1.5 Feature 2b）。Needs live bridge.
 
     跨版本属性漂移（5.0/5.1 bSupportsNanite -> 5.3 NaniteSettings.enabled -> 5.4 再变）
     走多候选 + 回读校验，写不进就 failed+tried，不假成功。半透明材质默认拦截。
@@ -757,7 +757,7 @@ def opt_mesh_set_nanite(paths: Annotated[str | None, Field(description="要改�
 
 
 def fix_nanite_translucent(paths: Annotated[str | None, Field(description="要处理的网格；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选网格")] = None, limit: Annotated[int, Field(description="本窗口最多处理多少个网格")] = 200, dry_run: Annotated[bool, Field(description="默认 true=只回冲突清单与计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """关掉"已开 Nanite 却挂半透明材质"的网格（写·双钥；TODO Feature 2b）。Needs live bridge.
+    """关掉"已开 Nanite 却挂半透明材质"的网格（写·双钥；v1.5 Feature 2b）。Needs live bridge.
 
     只动这一类冲突，正常 Nanite 网格不碰；材质 blend_mode 读不到时跳过（不误关）。
     关闭是降级不是损坏：网格按原 LOD 正常渲染，编辑器日志的成万条警告随之消失。
@@ -776,7 +776,7 @@ def fix_nanite_translucent(paths: Annotated[str | None, Field(description="要�
 
 
 def analyze_instancing(min_count: Annotated[int, Field(description="同网格重复多少个才算合批组（默认 5）")] = 5, cap: Annotated[int, Field(description="groups 返回条数上限")] = 40, include_samples: Annotated[int, Field(description="每组采样多少 Actor 名（便于核对）")] = 10, class_contains: Annotated[str | None, Field(description="按 Actor 类名子串过滤")] = None, tag: Annotated[str | None, Field(description="按 Actor tag 过滤")] = None, export: Annotated[bool, Field(description="true=另把方案落一份 JSON 到 <bus>/plans/（只写方案文件，不碰关卡与 Content）")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """当前关卡的 HISM/ISM 合并方案（只读；TODO Feature 3a + D2 路线 B）。Needs live bridge.
+    """当前关卡的 HISM/ISM 合并方案（只读；v1.5 Feature 3a + D2 路线 B）。Needs live bridge.
 
     分组键=网格包路径；给可折叠 Actor 数与 drawcall 前/后估算，并把混入蓝图放置器
     （非 StaticMeshActor）的组标成 blockers——合并前必须人工确认。
@@ -819,7 +819,7 @@ def _export_instancing_plan(bus_dir, result):
 
 
 def opt_collapse_hism(mode: Annotated[str, Field(description="plan=只出方案（默认）；collapse=真折叠（写关卡）；restore=按回滚清单重建源 Actor")] = "plan", mesh: Annotated[str | None, Field(description="只处理网格包路径含此子串的组；不填=按 limit 取最大的若干组")] = None, min_count: Annotated[int, Field(description="同网格重复多少个 Actor 才算可折叠组")] = 5, limit: Annotated[int, Field(description="本轮最多折叠多少个组（一组=一个 HISM）")] = 20, max_actors: Annotated[int, Field(description="本窗口最多扫描多少个关卡 Actor")] = 20000, class_contains: Annotated[str | None, Field(description="按 Actor 类名子串过滤")] = None, tag: Annotated[str | None, Field(description="按 Actor tag 过滤")] = None, manifest: Annotated[str | None, Field(description="collapse=回滚清单输出路径（默认 <Project>/Saved/Prism/hism_collapse_<时间戳>.json）；restore=要回滚的清单路径（必填）")] = None, allow_blockers: Annotated[bool, Field(description="false=组内混有非 StaticMeshActor（蓝图放置器）时整组拒收，默认拒收")] = False, allow_material_overrides: Annotated[bool, Field(description="false=源 Actor 带材质覆盖时整组拒收（折叠会丢覆盖），默认拒收")] = False, dry_run: Annotated[bool, Field(description="默认 true=只回方案，不动关卡")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
-    """把同网格散装 Actor 折叠成 HISM（写·双钥；路线 A，TODO Feature 3b）。Needs live bridge.
+    """把同网格散装 Actor 折叠成 HISM（写·双钥；路线 A，v1.5 Feature 3b）。Needs live bridge.
 
     mode=plan 只出方案与拒收原因（blockers / 材质覆盖 / over_limit）；mode=collapse 建 HISM、
     把源 Actor 的世界变换写进实例并销毁源 Actor，同时落一份 JSON 回滚清单；mode=restore

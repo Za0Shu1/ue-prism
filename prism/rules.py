@@ -433,7 +433,7 @@ def _rule_cook_empty_maps(ctx):
     return out
 
 
-# ---- v1.5 优化族规则（TODO Feature 1/2/3；口径与 opt_* 工具同源 prism/streaming.py）----
+# ---- v1.5 优化族规则（v1.5 Feature 1/2/3；口径与 opt_* 工具同源 prism/streaming.py）----
 
 # 真冲突短语。5.3 真实工程（ProjectA，4623 条同源）实测文本：
 #   LogStaticMesh: Warning: Invalid material [M_X] used on Nanite static mesh [SM_Y].

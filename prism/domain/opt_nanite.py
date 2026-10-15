@@ -1,6 +1,6 @@
 """Nanite：只读候选/冲突分析 + 批量开关（v1.5 PR-1/PR-3；编辑器内执行）。
 
-对应 TODO Feature 2。实测痛点：半透明材质挂 Nanite 网格 -> UE 静默降级 + 刷日志
+对应 v1.5 Feature 2。实测痛点：半透明材质挂 Nanite 网格 -> UE 静默降级 + 刷日志
 （某 5.3 真实工程 ~14,846 条 Warning 几乎全是这一条）。所以两件事分开做：
 - scan_nanite_candidates：列"该开的"（高面数/未开/材质不半透明）与"已开却半透明"的冲突项；
 - opt_mesh_set_nanite：批量开/关（写·双钥），命中半透明材质默认 skipped 并附 blend mode；
@@ -305,7 +305,7 @@ def opt_mesh_set_nanite(paths=None, folder="/Game", map=None, enabled=True,
 @register
 def fix_nanite_translucent(paths=None, folder="/Game", map=None, limit=200, offset=0,
                            dry_run=True, confirm=False):
-    """把"已开 Nanite 却挂半透明材质"的网格关掉（写·双钥；TODO Feature 2b）。
+    """把"已开 Nanite 却挂半透明材质"的网格关掉（写·双钥；v1.5 Feature 2b）。
 
     只关这一类冲突，不碰正常 Nanite 网格；材质读不到时跳过（不误关）。
     关闭是降级而非损坏：网格仍按原 LOD 正常渲染，警告随之消失。

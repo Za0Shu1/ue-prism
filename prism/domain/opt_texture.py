@@ -1,6 +1,6 @@
 """纹理流送池：只读诊断 + 批量优化写入（v1.5 PR-1/PR-2；编辑器内执行）。
 
-对应 TODO Feature 1。所有估算口径取自 prism/streaming.py（domain 与 rules 同源，
+对应 v1.5 Feature 1。所有估算口径取自 prism/streaming.py（domain 与 rules 同源，
 不会出现"工具说 8GB、报告说 6GB"的两套账）：
 - scan_texture_streaming：按 folder / 关卡 uses 闭包 / 显式 paths 枚举纹理，逐张给
   全链运行时估算并归入 池内 / 池外常驻 / 已虚拟化，汇出池需求与三档可执行收益；
@@ -450,7 +450,7 @@ def opt_texture_set_compression(paths=None, folder="/Game", map=None, compressio
                                 dry_run=True, confirm=False, probe_source=True, list_cap=80):
     """批量改压缩格式（写·双钥）。默认只动非工程运行时格式（未压缩系 / EditorIcon 系）。
 
-    这是池收益的大头（TODO 里标"可选"但实测最猛）：只改属性，重压缩由编辑器在保存后/
+    这是池收益的大头（计划里标"可选"但实测最猛）：只改属性，重压缩由编辑器在保存后/
     下次 cook 执行；结果提示需重压缩。两类收益口径不同：
       * uncompressed（真未压缩/浮点系）-> 按 4B/px 计，改 TC_Default 省约 3/4；
       * high_bpp（TC_HDR 高位深）-> 引擎实测按 8B/px 常驻(不降块压缩)，改 TC_Default 约省
