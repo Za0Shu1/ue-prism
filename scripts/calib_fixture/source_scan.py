@@ -18,6 +18,8 @@ PNG_SIG = b"\x89PNG\r\n\x1a\n"
 DDS_SIG = b"DDS "
 BMP_SIG = b"BM"
 JPEG_SIG = b"\xff\xd8\xff"
+HDR_SIG = b"#?RADIANCE"
+RGBE_SIG = b"#?RGBE"
 MIN_SIDE, MAX_SIDE = 8, 32768
 
 NAME_TOKENS = ("SourceFileData", "SourceFileType", "AssetImportData",
@@ -135,8 +137,43 @@ def parse_bmp(data, off):
             "bpp": bpp, "file_size": file_size}
 
 
+def parse_hdr(data, off):
+    """Radiance RGBE（.hdr）：ASCII 头里空行后是 "-Y h +X w" 分辨率行，纯 stdlib 可解。
+
+    立方图源几乎都是 .hdr——C 走原文件路线时这是主力格式，必须能解出宽高。
+    """
+    if not data[off:off + 10].startswith((HDR_SIG, RGBE_SIG)):
+        return None
+    blob = data[off:off + 4096]
+    try:
+        nl = blob.index(b"\n\n")
+    except ValueError:
+        return None
+    line = blob[nl + 2:nl + 80].split(b"\n")[0].strip()
+    axes = {}
+    parts = line.split()
+    i = 0
+    while i + 1 < len(parts):
+        tok, nxt = parts[i], parts[i + 1]
+        if tok in (b"+X", b"-X", b"+Y", b"-Y"):
+            try:
+                axes[tok] = int(nxt)
+            except ValueError:
+                return None
+            i += 2
+        else:
+            i += 1
+    w = axes.get(b"+X") or axes.get(b"-X")
+    h = axes.get(b"+Y") or axes.get(b"-Y")
+    if not w or not h or not (_side_ok(abs(w)) and _side_ok(abs(h))):
+        return None
+    return {"kind": "hdr", "offset": off, "w": abs(w), "h": abs(h),
+            "raw": line.decode("ascii", "replace")}
+
+
 _PARSERS = ((PNG_SIG, parse_png), (JPEG_SIG, parse_jpeg),
-            (DDS_SIG, parse_dds), (BMP_SIG, parse_bmp))
+            (DDS_SIG, parse_dds), (BMP_SIG, parse_bmp),
+            (HDR_SIG, parse_hdr), (RGBE_SIG, parse_hdr))
 
 
 def scan_blob(data, cap=50):

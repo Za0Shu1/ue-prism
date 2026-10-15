@@ -89,6 +89,19 @@ def test_own_dds_files_scan_to_exactly_authored_dims(tmp_path):
         assert [h for h in hits if h["kind"] != "dds"] == []
 
 
+def test_hdr_resolution_line_is_parsed():
+    """Radiance .hdr：立方图源的主力格式，头里 ASCII 分辨率行必须能解出宽高。"""
+    blob = (b"#?RADIANCE\nEXPOSURE=1.0\nFORMAT=32-bit_rle_rgbe\n\n"
+            b"-Y 512 +X 1024\n" + b"\x00" * 64)
+    hits = [h for h in ss.scan_blob(blob) if h["kind"] == "hdr"]
+    assert len(hits) == 1 and (hits[0]["w"], hits[0]["h"]) == (1024, 512)
+    rgbe = b"#?RGBE\nFORMAT=32-bit_rle_rgbe\n\n-Y 256 +X 256\n" + b"\x00" * 16
+    hits = [h for h in ss.scan_blob(rgbe) if h["kind"] == "hdr"]
+    assert len(hits) == 1 and (hits[0]["w"], hits[0]["h"]) == (256, 256)
+    bad = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n" + b"-Y 0 +X 0\n"
+    assert [h for h in ss.scan_blob(bad) if h["kind"] == "hdr"] == []
+
+
 def test_name_token_counter():
     blob = b"xx" + b"SourceFileData" + b"yy" + b"AssetImportData" + b"SourceFileData"
     got = ss.scan_names(blob)

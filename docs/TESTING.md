@@ -116,7 +116,7 @@
 
 ## v1.5 优化族的真机验收（5.3 / 5.4 均已跑）
 
-L0 436 用例（435 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
+L0 437 用例（436 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
 各 59/59 全 PASS**（2026-10-15，两具独立沙箱工程）。5.3 这一行照出一处只在跨版本时才会露脸的
 真值坑，产品代码不用改，改的是夹具：
 
@@ -204,7 +204,7 @@ B1 之后 C（"直读源图拿真边长"）剩的问题只有一个：源图的*
 
 - **包内：死路**。uasset 字节里 PNG/JPEG/BMP/DDS 签名零命中（6 张全 0），名字表痕迹只有
   `AssetImportData`——与 B1「存的是裸位图」吻合。判据 `source_scan.py` 纯 stdlib（签名 +
-  结构自洽校验），由 `tests/test_source_scan.py` 6 用例离线锁定：认得合成真头、拒绝声明尺寸
+  结构自洽校验），由 `tests/test_source_scan.py` 7 用例离线锁定：认得合成真头与 `.hdr` 分辨率行、拒绝声明尺寸
   自相矛盾的 BMP、64KB 种子噪声零误报、截断不越界不崩。
 - **import 元数据：可用的那条**。`get_editor_property("asset_import_data")` 返回
   `InterchangeAssetImportData`，其 `extract_filenames()/get_first_filename()`（含 script_ 同义
@@ -218,6 +218,24 @@ B1 之后 C（"直读源图拿真边长"）剩的问题只有一个：源图的*
 真机坑已钉进代码：5.4 下 python 仍持有最后一次 obj/子对象引用时 `delete_asset` 会在
 `ObjectTools::GatherObjectReferencersForDeletion` 空指针崩掉编辑器——清理前必须释放引用并
 `gc.collect()`（探针已这么做，之后 6/6 干净）；将来的产品删除逻辑同理。
+
+### B2/C 真实工程只读复测（`scripts/recheck_cube_semantics.py`，2026-10-15 授权）
+
+只读取证：枚举 /Game 全部 TextureCube（按 uasset 盘大小取前 N），冷态度量走域层真管线 +
+import 记录 + 原文件头解析；零写入零保存，取证 JSON 只落工程外目录（`PRISM_RECHECK_OUT` 必填）。
+结论两组：
+
+- **src_mem 双语义定案**：立方阵列源 = 6×S²×B（÷6 余 0；201,326,592=6×2048²×8 同值 6 张
+  全中）；2:1 RGBE 全景源 = 8×S²（必不被 6 整除；134,217,728=8×4096²，hDRI 真边长 4096，
+  6×4096²×8×4/3≈1073MB 对上载入实测 1024MB）。两假设按「÷6 余数 + 2 的幂判定」互斥，
+  无需旁证即可切分——这是修复提案 D（双假设求解器，金额口径、待拍板）的数据底座。
+- **C 定价修复放弃**：16/16 张 import 记录都有原始文件路径，但 0/16 仍在场（散在桌面/
+  外置盘/网盘目录，均已丢失）。在场时读头互验仍可用（Radiance `.hdr` 的 `parse_hdr` 已
+  进 `source_scan.py` 并由 L0 钉住）；另一半价值是「未保留源文件的资产清单」诊断。
+
+取证工具自身的两条真机教训（脚本已内置）：工程插件可能预加载**旧版 `prism` 占住模块缓存**
+（缺 `streaming` 直接 ImportError）——复测脚本先卸载非仓库来源的 `prism*` 模块再 import；
+commandlet 里异常只进引擎日志不可读——兜底 `_fail()` 把 traceback 落盘到取证目录。
 
 ## L2/L3 cook·package 全链路（`scripts/verify_cook_chain.py`）
 
