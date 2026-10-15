@@ -257,12 +257,17 @@ def _opt_texture_checks(r):
     icon = F + "/T_CalibIcon"
     cube = F + "/T_CalibCube"
     big_row = by.get(big) or {}
+    # 安全阀反向守卫（#11）：夹具靶都是 2 的幂源尺寸，size_basis 必须是 source_exact，
+    # 金额不得被撤（撤了 clamp_savings_mb 就是 None，>10MB 这条随之变红->按证据查不放宽）。
     r.check("streaming.clamp_target_planned",
             big in pkgs("need_clamp") and big_row.get("clamp_to") == 2048
-            and float(big_row.get("clamp_savings_mb") or 0) > 10.0,
+            and float(big_row.get("clamp_savings_mb") or 0) > 10.0
+            and big_row.get("size_basis") == "source_exact"
+            and big_row.get("source_side_exact") is True,
             {"row": {k: big_row.get(k) for k in ("source_width", "max_size", "pool_mb",
                                                  "virtual_texture", "clamp_to",
-                                                 "clamp_savings_mb")},
+                                                 "clamp_savings_mb", "size_basis",
+                                                 "source_side_exact")},
              "elapsed_s": dt})
     r.check("streaming.clamped_texture_not_reflagged",
             fb not in pkgs("need_clamp")
@@ -359,14 +364,18 @@ def _opt_texture_checks(r):
              "reasons": [str(x.get("reason"))[:60] for x in (g_default.get("targets") or [])]})
     pool = st.get("pool") or {}
     summ = st.get("summary") or {}
+    # 全窗口都该是可信尺寸：size_unverified_count 非 0 = 安全阀在已知真值的靶上误伤
     r.check("streaming.summary_separates_ledgers",
             summ.get("model", {}).get("version") and summ.get("uncompressed_count") == 0
-            and summ.get("non_streaming_count") >= 1,
+            and summ.get("non_streaming_count") >= 1
+            and int(summ.get("size_unverified_count") or 0) == 0,
             {"uncompressed": summ.get("uncompressed_count"),
              "non_streaming": summ.get("non_streaming_count"),
              "pool_demand_mb": summ.get("pool_demand_mb"),
              "permanent_mb": summ.get("permanent_mb"),
-             "potential_permanent_release_mb": summ.get("potential_permanent_release_mb")})
+             "potential_permanent_release_mb": summ.get("potential_permanent_release_mb"),
+             "size_unverified_count": summ.get("size_unverified_count"),
+             "savings_withheld_count": summ.get("savings_withheld_count")})
     r.check("streaming.summary_counts_high_bpp",
             int(summ.get("high_bpp_count") or 0) >= 1
             and summ.get("model", {}).get("version"),
@@ -382,11 +391,15 @@ def _opt_texture_checks(r):
 
     plan = r.call("opt_texture_clamp_max_size", {"paths": [big], "max_size": 2048,
                                                  "dry_run": True})
+    plan_row0 = (plan.get("targets") or [{}])[0]
     r.check("streaming.clamp_dry_run_does_not_write",
             plan.get("planned") == 1 and plan.get("changed") == 0
-            and plan.get("executed") is False and plan.get("dry_run") is True,
+            and plan.get("executed") is False and plan.get("dry_run") is True
+            and isinstance(plan_row0.get("savings_mb"), (int, float))
+            and int(plan.get("savings_withheld") or 0) == 0,
             {"planned": plan.get("planned"), "est_savings_mb": plan.get("est_savings_mb"),
-             "row": (plan.get("targets") or [{}])[0]})
+             "savings_withheld": plan.get("savings_withheld"),
+             "row": plan_row0})
     wr = r.call("opt_texture_clamp_max_size", {"paths": [big], "max_size": 2048,
                                                "dry_run": False, "confirm": True})
     row0 = (wr.get("targets") or [{}])[0]

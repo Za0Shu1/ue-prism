@@ -243,3 +243,65 @@ def test_clamp_force_mode_allows_widen_with_visible_cost():
                            only_if_larger=False)
     assert d["kind"] == "change" and d["savings_mb"] < 0
     assert "only_if_larger=False" in d["reason"]
+
+
+# ---------- 安全阀（#11）：源边长不可信时的钳尺寸判定与文案 ----------
+
+
+def _unverified(entry, mode="both"):
+    """域层给的两种线索都认：size_basis 与 flags（真实条目里两者同时出现）。"""
+    e = dict(entry)
+    if mode in ("both", "basis"):
+        e["size_basis"] = "source_unverified"
+    if mode in ("both", "flags"):
+        e["flags"] = ["size_unverified"]
+    return e
+
+
+def test_clamp_decision_withholds_money_but_keeps_plan():
+    d = ot._clamp_decision(_unverified(_entry_for_clamp(source_width=2365, runtime_mb=340.5)),
+                           2048)
+    assert d["kind"] == "change" and d["after"] == 2048
+    assert d["savings_mb"] is None              # 拿估出来的边长编金额 = 谎报
+    assert d["size_unverified"] is True and "复测" in d["note"]
+    assert d["runtime_mb"] == 340.5             # 台账照给，只撤金额
+
+
+def test_clamp_decision_unverified_no_op_tells_user_to_recheck():
+    d = ot._clamp_decision(_unverified(_entry_for_clamp(source_width=2365, max_size=1024)), 2048)
+    assert d["kind"] == "no_op" and "复测" in d["reason"]
+
+
+def test_clamp_decision_widen_unverified_does_not_invent_cost():
+    d = ot._clamp_decision(_unverified(_entry_for_clamp(source_width=2365, max_size=1024,
+                                                        runtime_mb=340.5), mode="flags"),
+                           0, widen=True)
+    assert d["kind"] == "change" and d["savings_mb"] is None
+    assert d["size_unverified"] is True
+
+
+def test_clamp_decision_verified_still_quotes_numbers():
+    d = ot._clamp_decision(dict(_entry_for_clamp(source_width=4096, runtime_mb=8.0),
+                                size_basis="source_exact"), 2048)
+    assert d["savings_mb"] == 6.0 and "size_unverified" not in d
+
+
+def test_advice_text_never_prints_none_amounts():
+    e = {"actions": ["clamp_max_size", "enable_vt"], "clamp_to": 2048,
+         "clamp_savings_mb": None, "vt_savings_mb": None,
+         "compression_savings_mb": None, "virtual_texture": False,
+         "never_stream": False, "vt_reason": None}
+    text = ot._advice_for(e)
+    assert "2048" in text and "虚拟纹理" in text and "暂不报价" in text
+    assert "None" not in text
+
+
+def test_acc_savings_keeps_withheld_money_out_of_both_ledgers():
+    from prism.domain import optutil as ou
+    base = {"est_savings_mb": 0.0, "est_permanent_release_mb": 0.0, "savings_withheld": 0}
+    ou._acc_savings(base, {"savings_mb": 12.0})
+    ou._acc_savings(base, {"savings_mb": None, "size_unverified": True})
+    ou._acc_savings(base, {"savings_mb": None, "size_unverified": True,
+                           "permanent_release_mb": 8.0})
+    assert base["est_savings_mb"] == 12.0 and base["est_permanent_release_mb"] == 0.0
+    assert base["savings_withheld"] == 2

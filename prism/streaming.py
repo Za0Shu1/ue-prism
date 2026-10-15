@@ -16,18 +16,26 @@ pluginpack.ENGINE_MODULES 打包进引擎侧给 domain 用；server/rules 同源
   * 其余（可流送且非虚拟）-> 可流送 mip 视为可全量进池，pool_mb = 全链（上界）。
 - 收益三档各自单列（钳尺寸 / 虚拟化 / 改压缩）；合并值按池需求封顶。
   改压缩收益与钳尺寸收益有重叠，故不并入合并值。
+- 安全阀（#11）：源边长反推没过校验（source_side_exact=false，典型是冷态 Cube 的
+  BPP/面数/mip 耦合多解）时只撤"依赖边长的金额报价"，不撤发现与动作——
+  clamp/compression 两档恒撤（边长直接进算式），vt/streaming_release 仅在无实测时撤
+  （实测 MB 与边长无关）。条目带 size_unverified flag 与 size_basis，
+  汇总单列 size_unverified_* 不确定度。
 """
 from __future__ import annotations
 
 import os
 import re
 
-POOL_MODEL_VERSION = "v2-format-aware-runtime"
+POOL_MODEL_VERSION = "v3-size-verification-aware"
 POOL_MODEL = {
     "version": POOL_MODEL_VERSION,
     "runtime_basis": "runtime_ledger: 实测 memory_bytes 优先(已含真实格式)，否则 est_runtime_bytes x 格式倍率",
-    "size_basis": "source_width (源盘反推，编辑器冷热态稳定)",
+    "size_basis": "source_width (源盘反推，编辑器冷热态稳定)；条目级 size_basis 标注本张实际口径",
     "source_size_basis": "source_memory 反推：候选 BPP{4,8,2,1,16,32,64} x 面数，取 2 的幂解",
+    "size_verification": "source_side_exact=false -> 撤金额(clamp/compression 恒撤; "
+                         "vt/streaming_release 仅无实测时撤)，保留 clamp_to 与 actions; "
+                         "条目加 size_unverified flag，汇总加 size_unverified_* 不确定度",
     "clamp_limit_basis": "effective_px = min(源边长, 现有 MaxSize)；已更紧的 MaxSize 不会被放宽",
     "pool_basis": "可流送非虚拟纹理按全链上界计入池；VT 与 never_stream 单列不计入",
     "format_basis": "运行时倍率 BC=1 / 未压缩=4 / 高位深(TC_HDR)=8；无 mip 禁流送系恒常驻池外",
@@ -264,6 +272,25 @@ def px_of(metrics):
     return to_px(m.get("width"))
 
 
+def size_basis(metrics):
+    """本张的尺寸口径（条目级；与 POOL_MODEL 的口径说明呼应，供消费方判金额可不可信）。
+
+    - source_exact: 边长来自 source_memory 反推且通过校验
+    - source_unverified: 反推无可信解（典型：真实工程 4096 立方图被推成 2365）
+      -> 依赖边长的金额由安全阀撤回，读数只当线索
+    - runtime_px: 没有源尺寸（probe_source=False 或读不到源内存），只有直读 width
+    - unknown: 两者都没有
+    """
+    m = metrics or {}
+    if m.get("source_side_exact") is False:
+        return "source_unverified"
+    if to_px(m.get("source_width")) > 0:
+        return "source_exact"
+    if to_px(m.get("width")) > 0:
+        return "runtime_px"
+    return "unknown"
+
+
 def runtime_ledger(metrics):
     """运行时字节台账（domain 的真大/假大判定与池估算同源，防两套账打架）。
 
@@ -297,6 +324,10 @@ def texture_pool_entry(metrics, cls_name=None, disk_bytes=None, px_error=4096, p
     返回：runtime_mb / bc_equivalent_mb / uncompressed_mb / pool_mb / permanent_mb /
     virtual_mb / clamp_to / clamp_savings_mb / vt_savings_mb / compression_savings_mb /
     vt_supported / vt_reason / actions[] / flags[] / runtime_basis / runtime_bytes_per_texel
+    / source_side_exact / size_basis
+
+    安全阀：size_basis=source_unverified 时金额字段可能是 None（不是 0.0——0.0 的含义是
+    "确认没有收益"），但 clamp_to 与 actions 保留：发现不能因为算不准就隐身（#7 踩过）。
     """
     m = metrics or {}
     fmt = format_class(m.get("compression"))
@@ -312,6 +343,10 @@ def texture_pool_entry(metrics, cls_name=None, disk_bytes=None, px_error=4096, p
     virtual = bool(m.get("virtual_texture"))
     never = bool(m.get("never_stream"))
     supported, reason = vt_support(cls_name)
+    # 安全阀开关：只有域层"显式标了不置信"才撤金额。缺键(None)不挡——
+    # probe_source=False 的保守路径与热态实测路径都不得被误伤。
+    unverified = m.get("source_side_exact") is False
+    measured = ledger["runtime_basis"] == "resident_memory"
 
     entry = {
         "class": cls_name,
@@ -329,6 +364,8 @@ def texture_pool_entry(metrics, cls_name=None, disk_bytes=None, px_error=4096, p
         "runtime_ratio": ledger["runtime_ratio"],
         "runtime_basis": ledger["runtime_basis"],
         "runtime_bytes_per_texel": ledger["runtime_bytes_per_texel"],
+        "source_side_exact": m.get("source_side_exact"),
+        "size_basis": size_basis(m),
         "streaming_release_mb": 0.0,
         "vt_supported": supported,
         "vt_reason": reason or None,
@@ -345,6 +382,8 @@ def texture_pool_entry(metrics, cls_name=None, disk_bytes=None, px_error=4096, p
         "actions": [],
         "flags": [],
     }
+    if unverified:
+        entry["flags"].append("size_unverified")
     if real <= 0:
         entry["flags"].append("no_runtime_metrics")
         return entry
@@ -362,23 +401,27 @@ def texture_pool_entry(metrics, cls_name=None, disk_bytes=None, px_error=4096, p
 
     if uncompressed:
         entry["flags"].append("uncompressed_format")
-        entry["compression_savings_mb"] = _mb(real - bc)
+        # bc 按边长算 -> 边长不可信则省额不可信；格式是直读的，发现照报、动作照给
+        entry["compression_savings_mb"] = None if unverified else _mb(real - bc)
         entry["actions"].append("set_compression")
     elif high_bpp:
         # TC_HDR 的 8B/px 是真金白银的池占用，但改成 BC 会丢动态范围 —— 只报账不默认改写，
         # 不进 actions（opt_texture_set_compression 需显式 only_uncompressed=False 才动）。
         entry["flags"].append("high_bpp_format")
-        entry["compression_savings_mb"] = _mb(real - bc)
+        entry["compression_savings_mb"] = None if unverified else _mb(real - bc)
     elif no_stream:
         entry["flags"].append("non_streaming_format")
         # 改回 TC_Default 的收益是"从恒常驻变可流送"，量级=全链，但不等于池收益
-        entry["streaming_release_mb"] = entry["permanent_mb"]
+        entry["streaming_release_mb"] = (None if (unverified and not measured)
+                                         else entry["permanent_mb"])
         entry["actions"].append("set_compression")
 
     if not virtual:
         # 建议只在收益够大时给：小纹理开 VT / 钳尺寸是噪音（阈值由 profile 传入）
         if supported and entry["pool_mb"] >= _as_float(min_vt_mb):
-            entry["vt_savings_mb"] = entry["pool_mb"]
+            # VT 移出的是"当前进池量"：有实测就照报；纯反推时它随边长一起不可信
+            entry["vt_savings_mb"] = (None if (unverified and not measured)
+                                      else entry["pool_mb"])
             entry["actions"].append("enable_vt")
         elif not supported:
             entry["flags"].append("vt_unsupported")
@@ -389,9 +432,15 @@ def texture_pool_entry(metrics, cls_name=None, disk_bytes=None, px_error=4096, p
             if sug:
                 saving = resize_delta_mb(_mb(real), limit, sug)
                 entry["clamp_to"] = sug
-                entry["clamp_savings_mb"] = saving
-                if saving >= _as_float(min_clamp_mb):
+                if unverified:
+                    # 省额按 (limit -> sug) 面积比算，limit 本身就不可信 -> 金额撤；
+                    # 没法用 min_clamp_mb 比较，但超限这件事仍值得报，动作保留
+                    entry["clamp_savings_mb"] = None
                     entry["actions"].append("clamp_max_size")
+                else:
+                    entry["clamp_savings_mb"] = saving
+                    if saving >= _as_float(min_clamp_mb):
+                        entry["actions"].append("clamp_max_size")
                 if judged >= px_error:
                     entry["flags"].append("oversized_mip_chain")
     if max_size > 0 and src_px and max_size < src_px:
@@ -402,7 +451,12 @@ def texture_pool_entry(metrics, cls_name=None, disk_bytes=None, px_error=4096, p
 
 
 def aggregate(entries):
-    """汇总池压力 + 三档收益（分列；合并值按池需求封顶，防同一 MB 算三遍）。"""
+    """汇总池压力 + 三档收益（分列；合并值按池需求封顶，防同一 MB 算三遍）。
+
+    安全阀撤回的 None 金额按 0 计入合计（不猜数），规模不确定度单列
+    size_unverified_count / size_unverified_pool_mb / size_unverified_permanent_mb，
+    被撤回过报价的条目数记 savings_withheld_count。
+    """
     out = {"textures": 0, "measured": 0, "unmeasured": 0,
            "runtime_mb": 0.0, "pool_demand_mb": 0.0, "permanent_mb": 0.0,
            "virtualized_mb": 0.0,
@@ -411,7 +465,9 @@ def aggregate(entries):
            "streaming_release_mb": 0.0, "potential_permanent_release_mb": 0.0,
            "need_clamp_count": 0, "need_vt_count": 0, "uncompressed_count": 0,
            "non_streaming_count": 0, "never_stream_count": 0, "vt_blocked_count": 0,
-           "oversized_count": 0, "high_bpp_count": 0}
+           "oversized_count": 0, "high_bpp_count": 0,
+           "size_unverified_count": 0, "size_unverified_pool_mb": 0.0,
+           "size_unverified_permanent_mb": 0.0, "savings_withheld_count": 0}
     for e in entries or []:
         out["textures"] += 1
         if not _as_float(e.get("runtime_mb")):
@@ -443,6 +499,15 @@ def aggregate(entries):
             out["vt_blocked_count"] += 1
         if "oversized_mip_chain" in (e.get("flags") or []):
             out["oversized_count"] += 1
+        if "size_unverified" in (e.get("flags") or []):
+            out["size_unverified_count"] += 1
+            out["size_unverified_pool_mb"] += _as_float(e.get("pool_mb"))
+            out["size_unverified_permanent_mb"] += _as_float(e.get("permanent_mb"))
+        for _money_key in ("clamp_savings_mb", "vt_savings_mb",
+                           "compression_savings_mb", "streaming_release_mb"):
+            if e.get(_money_key) is None:
+                out["savings_withheld_count"] += 1
+                break
     for key in list(out.keys()):
         if key.endswith("_mb"):
             out[key] = round(out[key], 3)

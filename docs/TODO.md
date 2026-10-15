@@ -7,8 +7,8 @@
 > 2026-10-14 补上 **PR-4 路线 A**（`opt_collapse_hism` 真折叠 + 回滚清单 + `--hism-roundtrip`
 > 真机往返），5.4.4 夹具 **59/59 全 PASS** + 真实大工程复跑。2026-10-15 **补跑 UE 5.3.2：59/59 全
 > PASS**（并在 5.4.4 沙箱用同一轮夹具复验 59/59，顺带钉住 5.3 导入自动开 VT 的真值坑，见复盘 #12）。
-> 剩余：5.5/5.8/5.1 等版本各补一行矩阵（本机只剩 5.3/5.4 引擎）；未修口径 #11（冷态 Cube 源边长
-> 反推）待拍板。
+> 剩余：5.5/5.8/5.1 等版本各补一行矩阵（本机只剩 5.3/5.4 引擎）；#11（冷态 Cube 源边长反推）
+> 已按 A″ 止血（撤金额不撤发现 + 不确定度单列），真机靶校准 B 待做。
 > 触发来源：对 UE 5.3 工程 ProjectA 的实测分析（详见会话），暴露三类可产品化的优化点。
 
 ## 背景（ProjectA 实测坐实的痛点）
@@ -74,24 +74,33 @@
   已是目标格式一律 `no_op` 且行内不带 savings；同名判定优先于 `only_uncompressed` 闸门。
   夹具补两条回归校验：`compression.already_target_is_no_op`（planned=1，只有 TC_HDR 那张是 change）、
   `compression.conservative_gate_still_blocks_high_bpp`（默认闸门 planned=0）。
-- ⚠️ **#11（未修，待拍板）冷态 Cube 源边长反推低估**：真实工程 4096 立方 `TC_HDR`（`hDRI`）在纹理
+- ✅ **#11 A″ 已止血（2026-10-15）冷态 Cube 源边长反推低估**：真实工程 4096 立方 `TC_HDR`（`hDRI`）在纹理
   未载入时被反推成 2365 边长 -> `runtime_mb` 340MB（`runtime_basis=derived_estimate`），载入后实测
-  1024MB（`resident_memory`），差 3 倍。根因：`texture_source_memory` 里 BPP/面数/mip 链三者耦合，
-  非 2 的幂解也满足误差容限（`source_side_exact=false` 已如实标注，不算谎报）。修法要先造"已知边长
-  的 Cube 真机靶"跨版本校准，属独立决策——本轮不动 `streaming` 数学，读数一律先看 `runtime_basis`。
-  2026-10-15 补跑矩阵时顺手取到一条对照数据，但**它证明不了 #11**：夹具的 `T_CalibHdr` 是 128 边长
-  立方图，5.3.2/5.4.4 两版都在热态量到 `runtime_basis=resident_memory`（实测 1.062MB=6×128²×8B×4/3，
-  `est_bc` 0.125MB、ratio 8.52），根本不走冷态反推那条歧路。要校准只能造**已知边长的大立方图靶**。
-  三个候选口径（等你拍）：
-  - **A 止血改口径（推荐先做，最便宜）**：Cube 在 `source_side_exact=false` 时不报边长——`source_width`
-    置 null + `size_basis=unresolved`，只报实测/占位账。代价是丢掉一个本来就不可信的数，收益是下游
-    不会再把 2365 当 4096 用（钳尺寸建议、`oversized_mip` 阈值判定都会跟着错）。纯 `streaming`/`metrics`
-    层改动 + L0 用例，不碰真机。
-  - **B 造已知边长的 Cube 真机靶**：跨版本校准反推（导入 cross 布局大图生成 TextureCube，或复制引擎里
-    已知边长的大立方图）。注意 5.3 Interchange 已实证会忽略 `destination_name`，造靶路径脆，需 5.3/5.4
-    各一次 L2 才能定候选。
-  - **C 直读源图头**：从 `source_disk_bytes` 对应的源数据（PNG IHDR / DDS header）解析真实边长。最准，
-    但要先实证 UE 存的 source 到底是不是原编码（5.3/5.4 可能不同），失败面最大。
+  1024MB，差 3 倍。根因：`texture_source_memory` 里 BPP/面数/mip 链三者耦合，非 2 的幂解也满足误差
+  容限（`source_side_exact=false` 已如实标注，不算谎报）。落地的口径 = **保留发现、只撤金额、量化不确定度**：
+  - `streaming.texture_pool_entry`：条目级新增 `size_basis`（source_exact / source_unverified /
+    runtime_px / unknown）与常驻 `source_side_exact`；`source_side_exact is False` 时 `flags +=
+    size_unverified`，`clamp_savings_mb` / `compression_savings_mb` 置 **None**（不是 0.0——0.0 的语义
+    是"确认没有收益"），`vt_savings_mb` / `streaming_release_mb` 仅在无实测时置 None（实测 MB 与边长
+    无关，该照报）；`clamp_to` 与 `actions` 保留，无法用 `min_clamp_mb` 比较时仍给 `clamp_max_size`。
+  - `streaming.aggregate()`：单列 `size_unverified_count` / `size_unverified_pool_mb` /
+    `size_unverified_permanent_mb` / `savings_withheld_count`；None 金额按 0 计入合计，不猜数。
+  - `rules`：`oversized_mip` 不因不报价而隐身（封顶 warn、证据带 `size_unverified`、advice 让先复测，
+    #7 的教训）；`uncompressed_texture` 三档只撤金额（格式是直读属性，档位/建议照给）；
+    `texture_streaming_overflow` 证据摊开不确定量并在 advice 播报。`annotate_roi` 靠 isinstance 守卫
+    自动不计入 MB 总计。
+  - `opt_texture` / `optutil`：`_clamp_decision` 不可信 -> `savings_mb=None` + 行内 `size_unverified`
+    （不拒绝写入，双钥照旧）；`_advice_for` 不印 `None`；`drive` 记 `savings_withheld` 并在 dry-run
+    note 播报"另有 N 项未报价"。
+  - 触发条件严格 `is False`：`probe_source=False` 与热态路径（缺键）一律不挡，不会误伤既有读数。
+    L0 15 用例钉口径；L2 反向守卫进 `checks.py`（夹具都是 2 的幂靶，必须 `size_basis=source_exact`
+    且照常报价、`size_unverified_count=0`）。
+  - 本轮**不动 `source_side_from_memory` 数学**（宁可少报价，不可编金额）。
+  **仍欠 B**：冷态大立方图的反推歧义率没有真机靶 -> 造"已知边长的大 Cube 靶"跨版本校准
+  （5.3 Interchange 已实证忽略 `destination_name`，造靶路径脆，需授权开真实工程或另想造靶途径）。
+  **C（备选）**：从 `source_disk_bytes` 对应的源数据（PNG IHDR / DDS header）直读边长——最准，
+  但要先实证 UE 存的 source 是否原编码，失败面最大。读数口径仍提醒：冷热态敏感的结论先看
+  `runtime_basis` 与 `size_basis`。
 - **#12 5.3 导入器把 4K 大图自动开成 VT**（2026-10-15 补跑 5.3 时红两条：
   `streaming.clamp_target_planned` / `streaming.vt_write_blocks_cube`）：5.3 的 `UTextureImportSettings.AutoVTSize`
   让源像素 ≥ 4096×4096 的贴图一进工程就 `VirtualTextureStreaming=true`（5.4 起取消该行为），于是钳尺寸/VT
@@ -162,8 +171,9 @@
   `fix_broken_references` dry-run 把它们全路由进 `unfixable_missing`（无重定向桩可自动修）。
   手感：`sample_size=80` 在万级资产工程会系统性欠采样（`high_bpp` 全靠大资产度量面命中）。
 - 合并前：L0 全绿；触碰 unreal 真机路径的写入 → 至少一个引擎版本 L2 全 PASS。
-  **当前状态：L0 398 用例全绿（397 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
-  真折叠↔回滚往返）→ 跨版本矩阵两列达标；仍欠 5.5/5.8/5.1（本机无引擎）。可合并，发版仍需用户明确授权。**
+  **当前状态：L0 413 用例全绿（412 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
+  真折叠↔回滚往返，以及 #11 安全阀改动后的复跑）→ 跨版本矩阵两列达标；仍欠 5.5/5.8/5.1（本机无引擎）。
+  可合并，发版仍需用户明确授权。**
 
 ## 里程碑
 - [x] PR-1（只读，低风险）：`scan_texture_streaming` + 3 纹理规则 + `scan_nanite_candidates`/`nanite_translucent_conflict` + `analyze_instancing`/`drawcall_batching`；产出进 `get_perf_report`。附 L0 用例 + L2 夹具靶。

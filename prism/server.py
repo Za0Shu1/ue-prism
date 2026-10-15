@@ -202,7 +202,8 @@ def get_asset_metrics(asset_paths: Annotated[str, Field(description="多个 /Gam
 
     每项附源盘大小(disk_bytes/disk_mb)与真大/假大判定：runtime_verdict
     (runtime_heavy=真显存/帧大户 | disk_only_bloat=源盘膨胀运行时被限死 | normal | unknown)
-    与 is_runtime_heavy；纹理另采 compression/virtual_texture/max_size/array_size。
+    与 is_runtime_heavy；纹理另采 compression/virtual_texture/max_size/array_size，
+    以及源边长可信度 source_side_exact / size_basis（false=反推多解，池收益会被安全阀撤回）。
     Loads assets into editor memory as a side effect - keep max_assets small. Needs live bridge.
     """
     bus_dir, _pd, err = _resolve(project)
@@ -651,6 +652,8 @@ def scan_texture_streaming(folder: Annotated[str, Field(description="Content 下
     （钳尺寸 / 开 VT / 改压缩），并读工程 ini 的 *PoolSize 给 overflow 判定。
     口径与 get_perf_report 的 oversized_mip / uncompressed_texture /
     texture_streaming_overflow 同源（prism/streaming.py），两套账不会打架。
+    安全阀：源边长反推未通过校验的条目 flags 含 size_unverified（size_basis=source_unverified），
+    金额字段是 None 而非 0.0，但发现/clamp_to/actions 照给；summary.size_unverified_* 给不确定量。
     """
     bus_dir, _pd, err = _resolve(project)
     if err:
@@ -689,6 +692,8 @@ def opt_texture_clamp_max_size(paths: Annotated[str | None, Field(description="�
 
     降流送池压力最便宜的一刀：只改属性，不动源图。dry-run 给每张 before→after
     与 savings_mb；已达标/已在阈值内 -> no_op。改动需编辑器重压缩才反映到盘上。
+    安全阀：源边长是反推估计的行 savings_mb=None + size_unverified（计划照给、写入不受影响），
+    顶层 savings_withheld 计数并在 note 播报——别把没把握的钱当成省下来的钱。
     """
     bus_dir, _pd, err = _resolve(project)
     if err:

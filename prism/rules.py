@@ -489,6 +489,10 @@ def _rule_texture_streaming_overflow(ctx):
         "uncompressed_count": agg["uncompressed_count"],
         "non_streaming_count": agg["non_streaming_count"],
         "potential_permanent_release_mb": agg["potential_permanent_release_mb"],
+        "size_unverified_count": agg["size_unverified_count"],
+        "size_unverified_pool_mb": agg["size_unverified_pool_mb"],
+        "size_unverified_permanent_mb": agg["size_unverified_permanent_mb"],
+        "savings_withheld_count": agg["savings_withheld_count"],
         "measured_textures": agg["measured"],
         "pool_source": config["effective"],
         "pool_note": config["note"],
@@ -512,39 +516,69 @@ def _rule_texture_streaming_overflow(ctx):
     else:
         advice = ("池需求(上界) %sMB 已到配置池 %sMB 的告警线：按 oversized_mip/"
                   "uncompressed_texture 逐张降需求最划算" % (demand, verdict["pool_mb"]))
+    if agg.get("size_unverified_count"):
+        # 安全阀（#11）：总账里有多少是"边长没把握"的，摊开了说，不藏进合计
+        advice += ("（其中 %d 张、约 %sMB 池需求建立在未通过校验的反推边长上，"
+                   "另有 %d 项收益已被安全阀撤回：先载入复测再定预算）"
+                   % (agg["size_unverified_count"], agg["size_unverified_pool_mb"],
+                      agg["savings_withheld_count"]))
     return [{"rule_id": "texture_streaming_overflow", "severity": sev,
              "subject": "%s (scope)" % ctx["scope"],
              "evidence": evidence,
              "threshold": verdict["pool_mb"], "advice": advice}]
 
 
+def _money_or_placeholder(value, format_text):
+    """收益金额文案：None = 安全阀撤回报价（源边长反推不可信），不编数字也不谎报 0。"""
+    if value is None:
+        return u"金额暂不报价（源边长为反推估计，先载入复测）"
+    return format_text % value
+
+
 def _rule_oversized_mip(ctx):
-    """未钳 MaxSize 的超大纹理：整条 mip 链进池，批量钳是成本最低的降需求手段。"""
+    """未钳 MaxSize 的超大纹理：整条 mip 链进池，批量钳是成本最低的降需求手段。
+
+    安全阀（#11）：源边长反推不可信时 clamp_savings_mb=None。此时仍出 finding
+    （severity 封顶 warn、证据里不写金额）——"算不准收益"不等于"看不见问题"，
+    直接 continue 会让 oversized_mip 整类隐身（#7 踩过同样的坑）。
+    """
     th_px = ctx["profile"]["texture_px"]
     th = ctx["profile"]["mip_clamp"]
     out = []
     for e in _ensure_pool_entries(ctx):
         if "clamp_max_size" not in (e.get("actions") or []):
             continue
-        saving = float(e.get("clamp_savings_mb") or 0.0)
-        if saving < float(th["min_savings_mb"]):
-            continue
+        saving = e.get("clamp_savings_mb")
+        unverified = saving is None or "size_unverified" in (e.get("flags") or [])
         px = int(e.get("source_width") or e.get("effective_width") or 0)
-        if px >= int(th_px["error"]) and saving >= float(th["error_savings_mb"]):
-            sev, limit = "error", int(th_px["error"])
-        else:
+        if unverified:
             sev, limit = "warn", float(th["min_savings_mb"])
+        else:
+            saving = float(saving or 0.0)
+            if saving < float(th["min_savings_mb"]):
+                continue
+            if px >= int(th_px["error"]) and saving >= float(th["error_savings_mb"]):
+                sev, limit = "error", int(th_px["error"])
+            else:
+                sev, limit = "warn", float(th["min_savings_mb"])
         evidence = {"source_width": px, "max_size": e.get("max_size"),
                     "clamp_to": e.get("clamp_to"), "savings_mb": saving,
                     "pool_mb": e.get("pool_mb"), "runtime_mb": e.get("runtime_mb"),
                     "virtual_texture": e.get("virtual_texture"),
                     "compression": e.get("compression"),
-                    "effective_width": e.get("effective_width")}
+                    "effective_width": e.get("effective_width"),
+                    "size_basis": e.get("size_basis")}
+        if unverified:
+            evidence["size_unverified"] = True
         evidence = {k: v for k, v in evidence.items() if v is not None}
+        advice = ("整条 mip 链进池：opt_texture_clamp_max_size(max_size=%s) "
+                  "批量钳（先 dry-run 看每张 before→after）" % e.get("clamp_to"))
+        if unverified:
+            advice += ("；源边长 %s 是反推估计值，省额不报价：先用 "
+                       "get_asset_metrics/scan_texture_streaming 载入复测再定钳到多少" % px)
         out.append({"rule_id": "oversized_mip", "severity": sev,
                     "subject": e["package"], "evidence": evidence, "threshold": limit,
-                    "advice": "整条 mip 链进池：opt_texture_clamp_max_size(max_size=%s) "
-                              "批量钳（先 dry-run 看每张 before→after）" % e.get("clamp_to")})
+                    "advice": advice})
     return out
 
 
@@ -558,6 +592,8 @@ def _rule_uncompressed_texture(ctx):
       收益口径是"改回 TC_Default 变可流送、释放常驻"，不是省池。
     判定用 streaming.format_class（与 opt_texture_set_compression 同一函数），
     unknown/本地化文本一律不报，宁可漏报也不误判美术格式。
+    格式是直读属性、不依赖边长，所以安全阀只撤金额（savings 为 None 时建议与
+    动作照给，证据里不编数字）。
     """
     th = ctx["profile"]["uncompressed_texture"]
     out = []
@@ -570,32 +606,37 @@ def _rule_uncompressed_texture(ctx):
             continue
         sev = "error" if mb >= float(th["error_mb"]) else "warn"
         if fmt == "no_stream":
-            saving = float(e.get("streaming_release_mb") or 0.0)
+            saving = e.get("streaming_release_mb")
             advice = ("%s 无 mip/禁用流送：整张恒常驻池外 %sMB（不进池但死占显存，"
                       "VT/钳尺寸救不了）；改回 TC_Default 可变可流送，"
                       "opt_texture_set_compression 默认只动这类（需重压缩）"
                       % (e.get("compression"), mb))
         elif fmt == "high_bpp":
-            saving = float(e.get("compression_savings_mb") or 0.0)
+            saving = e.get("compression_savings_mb")
             advice = ("%s 高位深不降块压缩（实测 %gB/px）：整张 %sMB 死占池/显存；改回 "
-                      "TC_Default 约省 %sMB，但会丢 HDR 动态范围，属美术决策 —— "
+                      "TC_Default %s，但会丢 HDR 动态范围，属美术决策 —— "
                       "opt_texture_set_compression 默认不动这类，要动需显式 "
                       "only_uncompressed=False，且改完要重压缩才反映到盘上"
                       % (e.get("compression"),
-                         float(e.get("runtime_bytes_per_texel") or 8), mb, saving))
+                         float(e.get("runtime_bytes_per_texel") or 8), mb,
+                         _money_or_placeholder(saving, "约省 %sMB")))
         else:
-            saving = float(e.get("compression_savings_mb") or 0.0)
-            advice = ("未压缩系(%s)按 %gB/px 常驻，改 TC_Default 可省约 %sMB；"
+            saving = e.get("compression_savings_mb")
+            advice = ("未压缩系(%s)按 %gB/px 常驻，改 TC_Default %s；"
                       "opt_texture_set_compression 默认只动这类（需重压缩）"
                       % (e.get("compression"),
-                         float(e.get("runtime_bytes_per_texel") or 4), saving))
+                         float(e.get("runtime_bytes_per_texel") or 4),
+                         _money_or_placeholder(saving, "可省约 %sMB")))
         evidence = {"compression": e.get("compression"), "format_class": fmt,
                     "runtime_mb": mb, "pool_mb": e.get("pool_mb"),
                     "permanent_mb": e.get("permanent_mb"), "savings_mb": saving,
                     "runtime_bytes_per_texel": e.get("runtime_bytes_per_texel"),
                     "runtime_basis": e.get("runtime_basis"),
                     "source_width": e.get("source_width"),
+                    "size_basis": e.get("size_basis"),
                     "virtual_texture": e.get("virtual_texture")}
+        if saving is None or "size_unverified" in (e.get("flags") or []):
+            evidence["size_unverified"] = True
         evidence = {k: v for k, v in evidence.items() if v is not None}
         out.append({"rule_id": "uncompressed_texture", "severity": sev,
                     "subject": e["package"], "evidence": evidence,
@@ -750,10 +791,12 @@ RULES = (
      "doc": "聚合流送池需求 vs 工程 ini 的 PoolSize（总账，不逐张）",
      "run": _rule_texture_streaming_overflow},
     {"id": "oversized_mip", "cfg": "mip_clamp", "channel": "bridge",
-     "doc": "未钳 MaxSize 的超大纹理：整条 mip 链进池，批量钳收益/成本比最高",
+     "doc": "未钳 MaxSize 的超大纹理：整条 mip 链进池，批量钳收益/成本比最高"
+          "（源边长反推不可信时仍报：severity 封顶 warn、evidence.size_unverified、不编金额）",
      "run": _rule_oversized_mip},
     {"id": "uncompressed_texture", "cfg": "uncompressed_texture", "channel": "bridge",
-     "doc": "非工程运行时压缩格式：未压缩系 4B/px、TC_HDR 高位深 8B/px 吃池；EditorIcon 系无 mip/禁流送恒常驻",
+     "doc": "非工程运行时压缩格式：未压缩系 4B/px、TC_HDR 高位深 8B/px 吃池；EditorIcon 系无 mip/禁流送恒常驻"
+          "（格式是直读属性，安全阀只撤金额不撤判定）",
      "run": _rule_uncompressed_texture},
     {"id": "nanite_translucent_conflict", "cfg": "nanite_translucent", "channel": "offline",
      "doc": "编辑器日志里 Nanite+半透明材质的静默降级警告（按指纹归因资产）",

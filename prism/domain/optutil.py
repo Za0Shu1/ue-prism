@@ -488,7 +488,11 @@ def _acc_savings(base, decision):
 
     inspect 给 permanent_release_mb 非空 -> 计常驻释放（禁流送/无 mip 系）；
     否则计池/显存节省（钳尺寸、虚拟化、改压缩）。
+    安全阀（#11）撤回的金额（savings_mb=None + size_unverified）不进任何一本账，
+    单独计入 savings_withheld：合计少的是"没把握的钱"，不是"没有的钱"。
     """
+    if decision.get("size_unverified"):
+        base["savings_withheld"] = _to_float(base.get("savings_withheld")) + 1
     value = _to_float(decision.get("savings_mb"))
     if decision.get("permanent_release_mb"):
         base["est_permanent_release_mb"] += value
@@ -514,6 +518,7 @@ def drive(op, terms, paths, folder, map_path, limit, offset, dry_run, confirm,
             "scope": {"folder": folder, "map": map_path, "source": resolved["source"]},
             "targets": [], "changed": 0, "no_op": 0, "skipped": [], "failed": [],
             "planned": 0, "est_savings_mb": 0.0, "est_permanent_release_mb": 0.0,
+            "savings_withheld": 0,
             "universe": resolved["universe"],
             "total": 0, "truncated": resolved["truncated"], "cap": resolved["cap"],
             "note": resolved["note"], "rejected": resolved["rejected"],
@@ -544,7 +549,7 @@ def drive(op, terms, paths, folder, map_path, limit, offset, dry_run, confirm,
                "savings_mb": decision.get("savings_mb")}
         for key in ("reason", "source_width", "current_size", "runtime_mb", "triangles",
                     "materials", "translucent", "detail", "format_class",
-                    "permanent_release_mb"):
+                    "permanent_release_mb", "size_unverified"):
             if decision.get(key) is not None:
                 row[key] = decision[key]
         if kind == "no_op":
@@ -597,12 +602,15 @@ def drive(op, terms, paths, folder, map_path, limit, offset, dry_run, confirm,
     base["est_permanent_release_mb"] = round(base["est_permanent_release_mb"], 3)
     base["tried"] = tried[-40:]
     if dry:
+        withheld = ("（另有 %d 项因源边长反推不可信未报价，见行内 size_unverified）"
+                   % base["savings_withheld"]) if base["savings_withheld"] else ""
         base["note"] = ("dry-run 计划：将改 %d 项（估算收益见各行 savings_mb：池/显存 %sMB"
-                        "%s），已达标 %d，跳过 %d，失败 %d。"
+                        "%s%s），已达标 %d，跳过 %d，失败 %d。"
                         "确认后带 dry_run=False 且 confirm=True 执行。"
                         % (base["planned"], base["est_savings_mb"],
                            ("，释放常驻 %sMB" % base["est_permanent_release_mb"])
                            if base["est_permanent_release_mb"] else "",
+                           withheld,
                            base["no_op"], len(base["skipped"]), len(base["failed"])))
     else:
         saved_count = 0

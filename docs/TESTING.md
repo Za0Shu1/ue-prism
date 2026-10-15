@@ -40,10 +40,24 @@
 - 编辑器刚载入的纹理，`blueprint_get_size_x`/`memory_size` 可能是 **32x32/4KB 占位**（资源未上传，
   bus 在主线程 tick 内处理、sleep 无效）；热态直读又可能是 **MaxSize 限幅后的有效尺寸**。
   因此度量层固定三分口径：`width`（现状）、`source_width`（源反推，规则判据）、`effective_width`（限幅后）。
-- 运行时规模一本账（`streaming.runtime_ledger`，POOL_MODEL `v2-format-aware-runtime`）：引擎实测
+- 运行时规模一本账（`streaming.runtime_ledger`，POOL_MODEL `v3-size-verification-aware`）：引擎实测
   `memory_bytes` 只要不低于 BC 下限就**直接采信**（它已含真实格式，再乘倍率会把 192MB 报成 1.5GB）；
   实测还是占位（未上传）才按"BC 近似 x 格式倍率"兜底（未压缩 4x / `TC_HDR` 8x）。domain 的
   `runtime_verdict` 与 `scan_texture_streaming` 同源，两个工具不会打架。
+- **源边长安全阀（POOL_MODEL `v3-size-verification-aware`，复盘 #11 的 A″ 止血）**：冷态贴图未载入时
+  `source_width` 只能由 `source_memory_bytes` 反推，Cube 6 面 x `TC_HDR` 8B/px x mip 链三者耦合让方程
+  多解（真实工程 4096 立方 `hDRI` 曾被推成 2365、估 340MB，载入后实测 1024MB）。域层标
+  `source_side_exact=false` 后，池模型**只撤依赖边长的金额**：`clamp_savings_mb` /
+  `compression_savings_mb` 恒撤（面积比与 bc 折算都吃边长），`vt_savings_mb` / `streaming_release_mb`
+  仅在没有实测（`runtime_basis=derived_estimate`）时撤——实测 MB 与边长无关，该照报。
+  **发现、`clamp_to` 与 actions 一律保留**（不报价 != 没问题，#7 的隐身教训），条目加 `size_unverified`
+  flag 与 `size_basis`（source_exact / source_unverified / runtime_px / unknown），汇总加
+  `size_unverified_count` / `size_unverified_pool_mb` / `size_unverified_permanent_mb` /
+  `savings_withheld_count`。金额是 `None` 而不是 `0.0`（0.0 的含义是"确认没有收益"），下游
+  `float(x or 0)` 求和天然容错，`annotate_roi` 的 isinstance 守卫自动不把它计入 MB 总计。
+  触发条件严格用 `is False`：缺键（`probe_source=False` 的保守路径、热态直读路径）一律不挡。
+  残余风险如实说：`runtime_mb` 仍是反推估计，所以 `oversized_mip` 在不可信时封顶 warn、
+  `uncompressed_texture` 的档位仍按台账 MB 判——彻底校准要等 #11 的 B（已知边长的大立方图真机靶）。
 - 材质槽取回的是 `MaterialInterface`：`blend_mode` 在接口上可读，`used_with_nanite` 只在基类材质上，
   读不到必须 `base_material()` 解包再试一次（仍读不到才留 null，不猜值）。
 
@@ -54,7 +68,7 @@
 
 | 校验点 | 已知真值 | 断言 |
 |---|---|---|
-| `streaming.clamp_target_planned` | T_BigNoise(4096^2, MaxSize=0) 该被建议钳到 2048 且收益 >10MB | need_clamp 命中 + clamp_to/clamp_savings_mb |
+| `streaming.clamp_target_planned` | T_BigNoise(4096^2, MaxSize=0) 该被建议钳到 2048 且收益 >10MB | need_clamp 命中 + clamp_to/clamp_savings_mb；**反向守卫**：`size_basis=source_exact` 且 `source_side_exact=true`（已知 2 的幂靶绝不该被安全阀撤金额，#11） |
 | `streaming.clamped_texture_not_reflagged` | T_FakeBig(MaxSize=128) 已被限幅 | 不在 need_clamp + flags 含 max_size_capped（假阳性负控） |
 | `streaming.editoricon_is_permanent_not_uncompressed` | T_CalibIcon 的 compression_settings=TC_EDITORICON | format_class=no_stream、pool_mb=0、permanent_mb>0、compression_savings_mb=0（防把常驻误报成 4B/px 省 3/4） |
 | `streaming.vt_skip_cube` | T_CalibCube 是 TextureCube | 进 candidates.vt_blocked 且 vt_savings_mb=0（5.4 实证勾选框置灰） |
@@ -63,10 +77,10 @@
 | `streaming.hdr_measured_not_multiplied_again` | 热态实测已含格式 | basis=resident_memory 时 `runtime_mb==measured`（±5%）；basis=derived_estimate 时必然 measured<est（回归：别把 192MB 再乘成 1.5GB） |
 | `streaming.hdr_metrics_and_scan_same_ledger` | 同一张图两条通路 | `get_asset_metrics.runtime_verdict` 与 `scan_texture_streaming` 的 runtime_mb/每纹素字节完全相等（一本账） |
 | `streaming.hdr_not_auto_recompressed` | 高位深改格式=美术决策 | `compression_savings_mb>0` 但 `actions` 不含 `set_compression`（工具默认不代改） |
-| `streaming.summary_separates_ledgers` | 池内 vs 池外常驻两本账 | summary.non_streaming_count>=1 且 uncompressed_count=0；model.version 常驻 |
-| `streaming.summary_counts_high_bpp` | high_bpp 与 uncompressed 分档 | summary.high_bpp_count>=1（收益比例 7/8 vs 3/4、动作不同，不能混一档）；model.version=v2-format-aware-runtime |
+| `streaming.summary_separates_ledgers` | 池内 vs 池外常驻两本账 | summary.non_streaming_count>=1 且 uncompressed_count=0；model.version 常驻；size_unverified_count=0（夹具全是已知尺寸） |
+| `streaming.summary_counts_high_bpp` | high_bpp 与 uncompressed 分档 | summary.high_bpp_count>=1（收益比例 7/8 vs 3/4、动作不同，不能混一档）；model.version=v3-size-verification-aware |
 | `streaming.pool_ini_read` | 夹具工程 Config 里有 ini | read_pool_config files_scanned>=1；compare.demand_mb 有值（读不到 PoolSize 时判 unknown，不猜默认） |
-| `streaming.clamp_dry_run_does_not_write` | dry_run=True | planned=1、changed=0、executed=False |
+| `streaming.clamp_dry_run_does_not_write` | dry_run=True | planned=1、changed=0、executed=False；行内 savings_mb 必须是数字且 `savings_withheld=0`（安全阀不得误伤可信边长） |
 | 计划窗口可读性（L0 `test_window_rows_put_actionable_first`） | 宽窗口里 change 与 no_op 混排 | `targets` 按 change 优先（收益降序）返回、`list_cap=0` 取全量、`list_cap`/`targets_truncated` 常驻（真实大工程踩点：61 张待钳被前 80 行 no_op 淹没，计划看起来像空的） |
 | `streaming.clamp_write_honest` | 双钥真写 MaxSize=2048 | changed=1 + api 命中签名 + saved!=False（写不进必须 failed） |
 | `streaming.clamp_readback_from_disk` | 写完再量 | get_asset_metrics 回读 max_size==2048（真值闭环） |
@@ -102,7 +116,7 @@
 
 ## v1.5 优化族的真机验收（5.3 / 5.4 均已跑）
 
-L0 398 用例（397 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
+L0 413 用例（412 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
 各 59/59 全 PASS**（2026-10-15，两具独立沙箱工程）。5.3 这一行照出一处只在跨版本时才会露脸的
 真值坑，产品代码不用改，改的是夹具：
 
@@ -198,12 +212,12 @@ HISM 折叠↔回滚）与 `verify_cook_chain`（cook 9 项 / package 10 项）�
 | `list_level_actors`（compose） | test_actors_compose | compose.world_ge_1400 / cube_batching_opportunity | 真实 WP 关卡全载成本 |
 | `read_editor_log`（P2 指纹归一+资产归因+按会话切分） / `attribute_cook_errors` | test_logscan(+3 会话用例:多会话拆分/每会话计数/单会话不标多) / test_attribute | -（纯离线，真实工程日志直读验证 distinct 194->10、LogPackageName 196 合 1 组归因 195 资产） | 与真实 cook 日志联动的归因抽检 |
 | `scan_folder_assets`（目录级预算 by_dir） | test_folderscan(+5 用例:预算/深度/cap-truncated/子树基) | -（纯离线磁盘，无引擎 API，不需夹具靶；report 间接） | 真实大工程目录占比手感 |
-| `get_perf_report`（12 规则+降档+ROI 注解+vs-上次 diff+可配采样/cap） | test_rules(+4 用例:annotate_roi 纯逻辑/run_report 带 roi_summary/report diff vs previous/snapshot disabled) / test_rules_runtime / test_rules_opt(22 用例:5 条 v1.5 新规则纯逻辑+ROI 两本账 unit+high_bpp 三档收益与"默认不代改压缩"+缺桥时必须播报不静默) | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded / cap_truncates_and_flags_hidden_errors / sampling_fields | sample_size/cap 可配（默认 top-80/cap=50）；大工程须显式调大 sample_size 或缩 scope。5.4 真机实测 sample_size 80→200 使 total 245→356（暴露 73 个被旧硬编码藏起的 error）；本轮 160 抽样在 14.38GB 美术工程得 381 findings（error 139/warn 242，含 7 条 high_bpp、0 条误报 Nanite 冲突）|
+| `get_perf_report`（12 规则+降档+ROI 注解+vs-上次 diff+可配采样/cap） | test_rules(+4 用例:annotate_roi 纯逻辑/run_report 带 roi_summary/report diff vs previous/snapshot disabled) / test_rules_runtime / test_rules_opt(26 用例:5 条 v1.5 新规则纯逻辑+ROI 两本账 unit+high_bpp 三档收益与"默认不代改压缩"+缺桥时必须播报不静默+安全阀 4 用例(oversized_mip 不因不报价隐身/可信窗口仍 error/uncompressed 三档只撤金额/overflow 摊开不确定量) | report.fake_big_downgrade_evidence / real_4k_stays_error / texture_evidence_upgraded / cap_truncates_and_flags_hidden_errors / sampling_fields | sample_size/cap 可配（默认 top-80/cap=50）；大工程须显式调大 sample_size 或缩 scope。5.4 真机实测 sample_size 80→200 使 total 245→356（暴露 73 个被旧硬编码藏起的 error）；本轮 160 抽样在 14.38GB 美术工程得 381 findings（error 139/warn 242，含 7 条 high_bpp、0 条误报 Nanite 冲突）|
 | `cook_package` / `get_cook_status`（cook+package） | test_cook(含 `test_package_command_template` package 模板)/ test_tasks | `--mode cook` 真机 9 项：uproject/编辑器关闭前置/dry 组装(+maps 定位)/双钥启动/状态收敛/succeeded(exit0)/cooked `CalibMap.umap` 落盘/`attribute_cook_errors` 0 错误组（UE5.4 实跑 BUILD SUCCESSFUL，695 包/0 error）。`--mode package` 真机 10 项：另走 `-build -cook -stage -pak -archive` 全链路，校验归档内 `.exe`+`.pak`（UE5.4 实跑 BUILD SUCCESSFUL/exit 0，exe+9.6MB pak 落盘/0 error 组；`--configuration Shipping` 另跑亦 10/10） | 跨版本 cook/package 兼容（5.3/5.8 各跑一次归档 matrix.json）；真实大工程 package 抽样 |
 | `preview_asset_migration` | test_migration_preview | - | - |
 | `migrate_asset_rename` / `_move` / `_asset`（写） | test_migrate / test_migrate_engine_shapes（双钥/dry_run/回滚/属性缺失形状） | migrate.rename_applies_redirect / rename_restored / move_applies / move_restored / copy_dryrun_plan / copy_applies / copy_conflict_refused（真机 rename_asset + 5.4 move→rename 兜底，内存态自还原；copy 走 `migrate_asset` duplicate 带走 uses 闭包 2 包 + 目标目录自动建 `make_directory`，内存态不落盘；每次跑用唯一 dest 并清理历史 `copy*` 残留，同名冲突必须结构化拒写） | 真实工程提交后引用复核；`fix_up_redirectors` 5.4 python 未绑定（诚实报告未确认清理，编辑器手动兜底） |
-| `scan_texture_streaming`（只读池诊断，probe_source 可关） | test_streaming_model（34 用例：钳尺寸/VT 可行性/格式四分类 compressed-uncompressed-no_stream-high_bpp-unknown/`runtime_ledger` 实测优先不重复乘/两本账汇总封顶/池对照/ini 优先级） + test_opt_texture（降级结构键含 high_bpp、cap 与窗口独立） | streaming.clamp_target_planned / clamped_texture_not_reflagged / editoricon_is_permanent_not_uncompressed / vt_skip_cube / hdr_bucketed_high_bpp / hdr_runtime_not_bc_estimate / hdr_measured_not_multiplied_again / hdr_metrics_and_scan_same_ledger / hdr_not_auto_recompressed / summary_separates_ledgers / summary_counts_high_bpp / pool_ini_read / enumerate.scan_one_row_per_package / enumerate.opt_rows_unique_and_measurable | 真实大工程的 `est_runtime` 与实测显存偏差；池需求上界 vs 实际驻留的手感（5.4 真实工程：抽样 140 张纹理池需求上界 4.2GB，其中 7 张 TC_HDR 立方图占 1.8GB） |
-| `opt_texture_set_virtual` / `opt_texture_clamp_max_size` / `opt_texture_set_compression`（写·双钥） | test_opt_texture(+双钥/字符串 bool 归一/负 max_size/建议文案/high_bpp 闸门/别名解析/同名格式 no_op + `_enum_member` 文本形态) + test_opt_server_contract(脏 bool 不建客户端/export 原子写) | streaming.clamp_dry_run_does_not_write / clamp_write_honest / clamp_readback_from_disk / clamp_restored_for_next_run / vt_write_blocks_cube / compression.already_target_is_no_op / conservative_gate_still_blocks_high_bpp | 重压缩时机与盘上体积回落（改压缩需编辑器重压缩，cook 前磁盘不变）；`bUsedWithVT` 需工程开 VT 才有真收益；TC_HDR 需 `only_uncompressed=False` 才动（默认挡在闸门外） |
+| `scan_texture_streaming`（只读池诊断，probe_source 可关，安全阀见上） | test_streaming_model（39 用例：钳尺寸/VT 可行性/格式四分类 compressed-uncompressed-no_stream-high_bpp-unknown/`runtime_ledger` 实测优先不重复乘/两本账汇总封顶/池对照/ini 优先级/源边长安全阀 5 用例（撤金额留动作、实测仍报价、缺键不挡、汇总不确定度）) + test_opt_texture（降级结构键含 high_bpp、cap 与窗口独立、`_advice_for` 不印 None 金额） | streaming.clamp_target_planned / clamped_texture_not_reflagged / editoricon_is_permanent_not_uncompressed / vt_skip_cube / hdr_bucketed_high_bpp / hdr_runtime_not_bc_estimate / hdr_measured_not_multiplied_again / hdr_metrics_and_scan_same_ledger / hdr_not_auto_recompressed / summary_separates_ledgers / summary_counts_high_bpp / pool_ini_read / enumerate.scan_one_row_per_package / enumerate.opt_rows_unique_and_measurable | **冷态大立方图的反推歧义率没有真机靶**（#11 B 待做：造已知边长的 Cube 靶跨版本校准）；真实大工程的 `est_runtime` 与实测显存偏差；池需求上界 vs 实际驻留的手感（5.4 真实工程：抽样 140 张纹理池需求上界 4.2GB，其中 7 张 TC_HDR 立方图占 1.8GB） |
+| `opt_texture_set_virtual` / `opt_texture_clamp_max_size` / `opt_texture_set_compression`（写·双钥） | test_opt_texture(+双钥/字符串 bool 归一/负 max_size/建议文案/high_bpp 闸门/别名解析/同名格式 no_op + `_enum_member` 文本形态 + `_clamp_decision` 安全阀 4 用例(撤金额留计划/no_op 提示复测/widen 不编代价/可信照报价) + `_acc_savings` 撤回金额不进两本账) + test_opt_server_contract(脏 bool 不建客户端/export 原子写) | streaming.clamp_dry_run_does_not_write / clamp_write_honest / clamp_readback_from_disk / clamp_restored_for_next_run / vt_write_blocks_cube / compression.already_target_is_no_op / conservative_gate_still_blocks_high_bpp | 重压缩时机与盘上体积回落（改压缩需编辑器重压缩，cook 前磁盘不变）；`bUsedWithVT` 需工程开 VT 才有真收益；TC_HDR 需 `only_uncompressed=False` 才动（默认挡在闸门外） |
 | `scan_nanite_candidates`（只读） | test_opt_nanite（27 用例：分类六态 + 降级键常驻 + `base_material()` 三态解包 + 材质清单非 null） | nanite.target_blocked_before_write / conflict_detected / material_usage_readable_via_base_material / material_instance_usage_not_null | 真实高模候选阈值手感（`min_triangles`）；真实工程某网格 5 材质经 `get_base_material()` 全部读到确定值 |
 | `opt_mesh_set_nanite` / `fix_nanite_translucent`（写·双钥） | test_opt_nanite（三条版本签名钉死 + 写不进必须 failed + 半透明拦截 + blend_mode 读不到保守跳过） | nanite.skip_translucent_blocks / force_write_honest / fix_write_honest / self_restored | 材质 `bUsedWithNanite` 只报不改（动材质另议）；真实工程警告回落抽检 |
 | `analyze_instancing`（只读，D2 路线 B） | test_opt_instancing（分组/阻断/drawcall 前后纯逻辑） | compose.instancing_groups | 折叠动作本身交给 `opt_collapse_hism`；真实工程关卡仍需人工确认 blockers |

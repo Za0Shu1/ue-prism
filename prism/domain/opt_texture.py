@@ -34,27 +34,39 @@ def _flt(value, default):
         return float(default)
 
 
+def _money(entry, key, format_text):
+    """金额文案：None = streaming 安全阀撤回报价（源边长反推不可信），不编数字。"""
+    value = entry.get(key)
+    if value is None:
+        return "省额暂不报价（源边长为反推估计，先载入复测）"
+    return format_text % value
+
+
 def _advice_for(entry):
     """把 actions 翻成一句可执行建议（工具输出面向人，规则面向机器）。"""
     bits = []
     if "clamp_max_size" in entry["actions"] and entry.get("clamp_to"):
-        bits.append("MaxSize 钳到 %d（省约 %sMB）" % (entry["clamp_to"], entry["clamp_savings_mb"]))
+        bits.append("MaxSize 钳到 %d（%s）"
+                    % (entry["clamp_to"], _money(entry, "clamp_savings_mb", "省约 %sMB")))
     if "enable_vt" in entry["actions"]:
-        bits.append("开虚拟纹理（移出传统池约 %sMB）" % entry["vt_savings_mb"])
+        bits.append("开虚拟纹理（%s）"
+                    % _money(entry, "vt_savings_mb", "移出传统池约 %sMB"))
     if entry.get("uncompressed"):
-        bits.append("未压缩系按 4B/px：压缩格式改 TC_Default（省约 %sMB）"
-                    % entry["compression_savings_mb"])
+        bits.append("未压缩系按 4B/px：压缩格式改 TC_Default（%s）"
+                    % _money(entry, "compression_savings_mb", "省约 %sMB"))
     elif entry.get("high_bpp"):
-        bits.append("TC_HDR 高位深不降块压缩（实测 %gB/px，整张 %sMB）：改 TC_Default 约省 %sMB，"
+        bits.append("TC_HDR 高位深不降块压缩（实测 %gB/px，整张 %sMB）：改 TC_Default %s，"
                     "但会丢 HDR 动态范围 —— 属美术决策，默认工具不动，需显式 "
                     "only_uncompressed=False"
                     % (_flt(entry.get("runtime_bytes_per_texel"), 8.0),
-                       entry["runtime_mb"], entry["compression_savings_mb"]))
+                       entry["runtime_mb"],
+                       _money(entry, "compression_savings_mb", "约省 %sMB")))
     elif entry.get("non_streaming_format"):
         bits.append("%s 无 mip/禁用流送，整张恒常驻(池外)%sMB：改回 TC_Default 可流送化"
                     % (entry.get("compression"), entry["permanent_mb"]))
     elif "set_compression" in entry["actions"]:
-        bits.append("压缩格式改 TC_Default（省约 %sMB）" % entry["compression_savings_mb"])
+        bits.append("压缩格式改 TC_Default（%s）"
+                    % _money(entry, "compression_savings_mb", "省约 %sMB"))
     if not bits:
         if entry["virtual_texture"]:
             bits.append("已是虚拟纹理，池压力已解")
@@ -104,6 +116,9 @@ def scan_texture_streaming(folder="/Game", map=None, paths=None, max_assets=200,
     probe_source=False 关掉源尺寸探针（见 metrics._source_probe 的引擎断言竞态）：
     此时 source_width 退化为运行时有效边长，钳尺寸/超限判定偏保守，sampling.source_probe
     与 note 会显式播报，不会静默给"看着更小"的收益。
+    安全阀（#11）：源边长反推未通过校验的条目带 flags=size_unverified / size_basis=
+    source_unverified，金额字段为 None（不是 0.0）；发现、clamp_to 与动作照常给，
+    summary.size_unverified_* 摊开这部分不确定度。
     """
     top = max(1, _int(top, 25))
     max_assets = max(1, _int(max_assets, 200))
@@ -194,6 +209,8 @@ def scan_texture_streaming(folder="/Game", map=None, paths=None, max_assets=200,
                 row["savings_mb"] = e.get("compression_savings_mb")
             elif key == "vt_blocked":
                 row["reason"] = e.get("vt_reason")
+            if "size_unverified" in (e.get("flags") or []):
+                row["size_unverified"] = True
             slim.append(row)
         slim.sort(key=lambda r: (-_flt(r.get("savings_mb") or r.get("pool_mb"), 0.0),
                                  str(r.get("package"))))
@@ -273,8 +290,11 @@ def opt_texture_set_virtual(paths=None, folder="/Game", map=None, limit=200, off
                     "reason": "已是虚拟纹理（池压力已解）"}
         _metrics, entry = _entry_of(unreal, obj, target, tried, probe_source)
         savings = entry["vt_savings_mb"] if entry else 0.0
-        return {"kind": "change", "before": False, "after": True, "prop_hit": hit,
-                "savings_mb": savings, "runtime_mb": entry["runtime_mb"] if entry else None}
+        row = {"kind": "change", "before": False, "after": True, "prop_hit": hit,
+               "savings_mb": savings, "runtime_mb": entry["runtime_mb"] if entry else None}
+        if entry and "size_unverified" in (entry.get("flags") or []):
+            row["size_unverified"] = True
+        return row
 
     def write(unreal, obj, decision, target):
         return _u.set_prop_any(obj, ("virtual_texture_streaming",), True)
@@ -303,34 +323,47 @@ def _clamp_decision(entry, want, only_if_larger=True, widen=False):
     与 streaming.resize_delta_mb 同一个式子，不会出现"scan 说 79MB、opt 说 0MB"。
     关键守卫：只收紧不放宽——现有 MaxSize 比目标更紧时是 no_op（5.4 真实工程曾把
     T_Dirt 的 512 计划成 2048，那是把限制放大，不是优化）。
+    安全阀（#11）：源边长反推不可信时 savings_mb=None（不拿估出来的边长编金额），
+    判定与写入动作照给——要不要动由调用方看完 size_unverified 再决定，双钥不变。
     """
     cur = _int(entry.get("max_size"), 0)
     src = _int(entry.get("source_width"), 0)
     judged = src or _int(entry.get("effective_width"), 0)
     limit = _st.effective_px(judged, cur)
     runtime_mb = _flt(entry.get("runtime_mb"), 0.0)
+    unverified = (entry.get("size_basis") == "source_unverified"
+                  or "size_unverified" in (entry.get("flags") or []))
     row = {"source_width": src, "current_size": limit or judged,
            "runtime_mb": runtime_mb, "before": cur or None}
+    if unverified:
+        row["size_unverified"] = True
     if widen:
         if cur <= 0:
             return dict(row, kind="no_op", after=None,
                         reason="本来就没设 MaxTextureSize 限制，无需取消")
-        growth = _st.resize_delta_mb(runtime_mb, limit, judged)
+        growth = None if unverified else _st.resize_delta_mb(runtime_mb, limit, judged)
         return dict(row, kind="change", after=0, savings_mb=growth,
-                    reason="max_size=0 取消限制：运行时上限从 %d 变回源尺寸，"
-                          "savings_mb 为负即变大量（读不到源尺寸时算不出）" % limit)
+                    reason="max_size=0 取消限制：运行时上限从 %d 变回源尺寸，%s"
+                          % (limit, "savings_mb 为负即变大量（读不到源尺寸时算不出）"
+                             if not unverified else "源边长为反推估计：变大量暂不报价"))
     if limit <= 0:
         return dict(row, kind="unknown", after=want,
                     note="读不到尺寸，无法判断是否超限")
     if cur == want:
         return dict(row, kind="no_op", after=cur, reason="max_size 已是 %d" % want)
     if want >= limit and _u.to_bool(only_if_larger, True):
-        return dict(row, kind="no_op", after=cur or None,
-                    reason="运行时受限边长 %d 已在目标 %d 内：收紧没有收益，"
-                          "本工具不把现有 MaxSize 放宽" % (limit, want))
-    savings = _st.resize_delta_mb(runtime_mb, limit, want)
+        reason = ("运行时受限边长 %d 已在目标 %d 内：收紧没有收益，"
+                  "本工具不把现有 MaxSize 放宽" % (limit, want))
+        if unverified:
+            reason += "（源边长为反推估计：判定偏保守，载入复测后若仍超限再钳）"
+        return dict(row, kind="no_op", after=cur or None, reason=reason)
+    savings = None if unverified else _st.resize_delta_mb(runtime_mb, limit, want)
     out = dict(row, kind="change", after=want, savings_mb=savings)
-    if savings < 0:
+    if unverified:
+        out["note"] = ("源边长反推未通过校验（size_basis=%s）：省额暂不报价，"
+                       "先 get_asset_metrics/scan_texture_streaming 载入复测再定 max_size"
+                       % (entry.get("size_basis") or "source_unverified"))
+    elif savings < 0:
         out["reason"] = ("only_if_larger=False 才会走到这里：把运行时上限从 %d 放宽到 %d "
                          "会变大 %sMB（负收益=代价），确认这不是误改" % (limit, want, -savings))
     return out
@@ -484,6 +517,8 @@ def opt_texture_set_compression(paths=None, folder="/Game", map=None, compressio
             release = 0.0
         return {"kind": "change", "before": before, "after": str(compression),
                 "prop_hit": hit, "savings_mb": savings, "format_class": fmt,
+                "size_unverified": True if (entry and "size_unverified"
+                                            in (entry.get("flags") or [])) else None,
                 "permanent_release_mb": release or None,
                 "runtime_mb": runtime,
                 "reason": {"uncompressed": "未压缩系按 4B/px -> %s" % compression,

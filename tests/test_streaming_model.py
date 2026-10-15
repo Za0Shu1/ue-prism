@@ -416,3 +416,86 @@ def test_pool_entry_cube_at_threshold_gets_no_clamp_advice():
            "source_bytes_per_texel": 8, "compression": "TextureCompressionSettings.TC_HDR"}
     e = st.texture_pool_entry(hdr, "TextureCube", px_warn=2048)
     assert e["clamp_to"] is None and e["clamp_savings_mb"] == 0.0
+
+
+# ---------- 安全阀：源边长反推不可信时撤金额、留发现（#11 A" ）----------
+
+
+def _cold_cube():
+    """真实工程复盘的冷态靶：4096 立方图(TC_HDR 8B/px) 未载入时被反推成 2365。"""
+    return {"est_runtime_bytes": int(2365 * 2365 * 6 * 1.33), "memory_bytes": 4096,
+            "source_width": 2365, "source_side_exact": False,
+            "source_bytes_per_texel": 8,
+            "compression": "TextureCompressionSettings.TC_HDR"}
+
+
+def test_pool_entry_withholds_money_but_keeps_plan_when_side_unverified():
+    e = st.texture_pool_entry(_cold_cube(), "TextureCube")
+    assert e["size_basis"] == "source_unverified"
+    assert e["source_side_exact"] is False
+    assert "size_unverified" in e["flags"]
+    assert e["clamp_to"] == 2048 and e["clamp_savings_mb"] is None
+    assert "clamp_max_size" in e["actions"]        # 不报价 != 不建议
+    assert e["compression_savings_mb"] is None     # bc 由边长算出 -> 一并撤回
+    assert e["runtime_mb"] > 0.0 and e["pool_mb"] > 0.0   # 台账仍给（带 flag 的估计值）
+
+
+def test_pool_entry_unverified_cold_withholds_vt_and_release_amounts():
+    m = {"est_runtime_bytes": 4 * 1048576, "memory_bytes": 4096,
+         "source_width": 2365, "source_side_exact": False,
+         "compression": "TextureCompressionSettings.TC_NONE"}
+    e = st.texture_pool_entry(m, "Texture2D")
+    assert e["runtime_basis"] == "derived_estimate"
+    assert e["vt_savings_mb"] is None and e["clamp_savings_mb"] is None
+    assert e["compression_savings_mb"] is None
+    assert set(e["actions"]) == {"set_compression", "enable_vt", "clamp_max_size"}
+    icon = st.texture_pool_entry(dict(m, compression="TextureCompressionSettings.TC_EDITORICON"),
+                                 "Texture2D")
+    assert icon["streaming_release_mb"] is None and icon["permanent_mb"] == 4.0
+    assert "set_compression" in icon["actions"]
+
+
+def test_pool_entry_measured_memory_keeps_vt_and_release_quotes():
+    """实测 MB 与边长无关：反推不可信时 vt/常驻释放照报，只有依赖边长的两档撤回。"""
+    m = {"est_runtime_bytes": BIG, "memory_bytes": 201326592,
+         "source_width": 2365, "source_side_exact": False,
+         "compression": "TextureCompressionSettings.TC_EDITORICON"}
+    e = st.texture_pool_entry(m, "Texture2D")
+    assert e["runtime_basis"] == "resident_memory"
+    assert e["permanent_mb"] == 192.0 and e["streaming_release_mb"] == 192.0
+    assert e["clamp_to"] == 2048 and e["clamp_savings_mb"] is None
+
+
+def test_pool_entry_exact_or_missing_flag_is_not_gated():
+    """只有显式 false 触发安全阀：exact=True / 缺键（probe_source=False 等）照旧报价。"""
+    exact = st.texture_pool_entry({"est_runtime_bytes": BIG, "source_width": 4096,
+                                   "source_side_exact": True}, "Texture2D")
+    assert exact["size_basis"] == "source_exact"
+    assert exact["clamp_savings_mb"] == 6.0 and exact["vt_savings_mb"] == 8.0
+    assert "size_unverified" not in exact["flags"]
+    legacy = st.texture_pool_entry({"est_runtime_bytes": BIG, "source_width": 4096},
+                                   "Texture2D")
+    assert legacy["size_basis"] == "source_exact" and legacy["clamp_savings_mb"] == 6.0
+    warm = st.texture_pool_entry({"est_runtime_bytes": BIG, "width": 4096}, "Texture2D")
+    assert warm["size_basis"] == "runtime_px" and warm["clamp_savings_mb"] == 6.0
+    assert st.texture_pool_entry({}, "Texture2D")["size_basis"] == "unknown"
+
+
+def test_aggregate_reports_size_uncertainty_and_withheld_quotes():
+    cold = st.texture_pool_entry(_cold_cube(), "TextureCube")
+    warm = st.texture_pool_entry({"est_runtime_bytes": BIG, "source_width": 4096,
+                                  "source_side_exact": True}, "Texture2D")
+    icon = st.texture_pool_entry({"est_runtime_bytes": 4 * 1048576, "memory_bytes": 4096,
+                                  "source_width": 2365, "source_side_exact": False,
+                                  "compression": "TextureCompressionSettings.TC_EDITORICON"},
+                                 "Texture2D")
+    agg = st.aggregate([dict(cold, package="/Game/T/Cube"),
+                        dict(warm, package="/Game/T/Warm"),
+                        dict(icon, package="/Game/T/Icon")])
+    assert agg["size_unverified_count"] == 2
+    assert agg["size_unverified_pool_mb"] == round(cold["pool_mb"] + icon["pool_mb"], 3)
+    assert agg["size_unverified_permanent_mb"] == icon["permanent_mb"]
+    assert agg["savings_withheld_count"] == 2
+    assert agg["clamp_savings_mb"] == warm["clamp_savings_mb"]   # None 按 0 计入，不猜数
+    assert agg["model"]["version"] == "v3-size-verification-aware"
+    assert "size_verification" in agg["model"]
