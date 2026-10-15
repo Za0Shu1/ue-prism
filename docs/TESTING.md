@@ -40,11 +40,11 @@
 - 编辑器刚载入的纹理，`blueprint_get_size_x`/`memory_size` 可能是 **32x32/4KB 占位**（资源未上传，
   bus 在主线程 tick 内处理、sleep 无效）；热态直读又可能是 **MaxSize 限幅后的有效尺寸**。
   因此度量层固定三分口径：`width`（现状）、`source_width`（源反推，规则判据）、`effective_width`（限幅后）。
-- 运行时规模一本账（`streaming.runtime_ledger`，POOL_MODEL `v3-size-verification-aware`）：引擎实测
+- 运行时规模一本账（`streaming.runtime_ledger`，POOL_MODEL `v4-cube-dual-hypothesis`）：引擎实测
   `memory_bytes` 只要不低于 BC 下限就**直接采信**（它已含真实格式，再乘倍率会把 192MB 报成 1.5GB）；
   实测还是占位（未上传）才按"BC 近似 x 格式倍率"兜底（未压缩 4x / `TC_HDR` 8x）。domain 的
   `runtime_verdict` 与 `scan_texture_streaming` 同源，两个工具不会打架。
-- **源边长安全阀（POOL_MODEL `v3-size-verification-aware`，复盘 #11 的 A″ 止血）**：冷态贴图未载入时
+- **源边长安全阀（POOL_MODEL `v4-cube-dual-hypothesis`，复盘 #11 的 A″ 止血）**：冷态贴图未载入时
   `source_width` 只能由 `source_memory_bytes` 反推，Cube 6 面 x `TC_HDR` 8B/px x mip 链三者耦合让方程
   多解（真实工程 4096 立方 `hDRI` 曾被推成 2365、估 340MB，载入后实测 1024MB）。域层标
   `source_side_exact=false` 后，池模型**只撤依赖边长的金额**：`clamp_savings_mb` /
@@ -78,7 +78,7 @@
 | `streaming.hdr_metrics_and_scan_same_ledger` | 同一张图两条通路 | `get_asset_metrics.runtime_verdict` 与 `scan_texture_streaming` 的 runtime_mb/每纹素字节完全相等（一本账） |
 | `streaming.hdr_not_auto_recompressed` | 高位深改格式=美术决策 | `compression_savings_mb>0` 但 `actions` 不含 `set_compression`（工具默认不代改） |
 | `streaming.summary_separates_ledgers` | 池内 vs 池外常驻两本账 | summary.non_streaming_count>=1 且 uncompressed_count=0；model.version 常驻；size_unverified_count=0（夹具全是已知尺寸） |
-| `streaming.summary_counts_high_bpp` | high_bpp 与 uncompressed 分档 | summary.high_bpp_count>=1（收益比例 7/8 vs 3/4、动作不同，不能混一档）；model.version=v3-size-verification-aware |
+| `streaming.summary_counts_high_bpp` | high_bpp 与 uncompressed 分档 | summary.high_bpp_count>=1（收益比例 7/8 vs 3/4、动作不同，不能混一档）；model.version=v4-cube-dual-hypothesis |
 | `streaming.pool_ini_read` | 夹具工程 Config 里有 ini | read_pool_config files_scanned>=1；compare.demand_mb 有值（读不到 PoolSize 时判 unknown，不猜默认） |
 | `streaming.clamp_dry_run_does_not_write` | dry_run=True | planned=1、changed=0、executed=False；行内 savings_mb 必须是数字且 `savings_withheld=0`（安全阀不得误伤可信边长） |
 | 计划窗口可读性（L0 `test_window_rows_put_actionable_first`） | 宽窗口里 change 与 no_op 混排 | `targets` 按 change 优先（收益降序）返回、`list_cap=0` 取全量、`list_cap`/`targets_truncated` 常驻（真实大工程踩点：61 张待钳被前 80 行 no_op 淹没，计划看起来像空的） |
@@ -116,8 +116,9 @@
 
 ## v1.5 优化族的真机验收（5.3 / 5.4 均已跑）
 
-L0 437 用例（436 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
-各 59/59 全 PASS**（2026-10-15，两具独立沙箱工程）。5.3 这一行照出一处只在跨版本时才会露脸的
+L0 444 用例（443 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
+各 59/59 全 PASS**（2026-10-15，两具独立沙箱工程；#11 D 落地成 POOL_MODEL
+`v4-cube-dual-hypothesis` 后同日复跑，两版桥都回传 `source_layout=cube_array`）。5.3 这一行照出一处只在跨版本时才会露脸的
 真值坑，产品代码不用改，改的是夹具：
 
 - **5.3 的贴图导入器会按 `UTextureImportSettings.AutoVTSize`（源像素 ≥ 4096×4096）自动把大贴图置成
@@ -228,7 +229,7 @@ import 记录 + 原文件头解析；零写入零保存，取证 JSON 只落工�
 - **src_mem 双语义定案**：立方阵列源 = 6×S²×B（÷6 余 0；201,326,592=6×2048²×8 同值 6 张
   全中）；2:1 RGBE 全景源 = 8×S²（必不被 6 整除；134,217,728=8×4096²，hDRI 真边长 4096，
   6×4096²×8×4/3≈1073MB 对上载入实测 1024MB）。两假设按「÷6 余数 + 2 的幂判定」互斥，
-  无需旁证即可切分——这是修复提案 D（双假设求解器，金额口径、待拍板）的数据底座。
+  无需旁证即可切分——这是已落地的 D（双假设求解器，POOL_MODEL `v4-cube-dual-hypothesis`）的数据底座。
 - **C 定价修复放弃**：16/16 张 import 记录都有原始文件路径，但 0/16 仍在场（散在桌面/
   外置盘/网盘目录，均已丢失）。在场时读头互验仍可用（Radiance `.hdr` 的 `parse_hdr` 已
   进 `source_scan.py` 并由 L0 钉住）；另一半价值是「未保留源文件的资产清单」诊断。
@@ -290,7 +291,7 @@ HISM 折叠↔回滚）与 `verify_cook_chain`（cook 9 项 / package 10 项）�
 | `get_asset_chain`（环/god/影响半径） | test_assets(+SCC 纯逻辑) / test_buscall | -（小图 smoke） | 真实大工程的大闭包耗时、god_min_refs 阈值手感 |
 | `scan_orphan_assets`（一包一条 + 单包引用查询失败降级） | test_orphan_degrade / test_scan_orphan_ref_failure（3 用例：单包失败不带走整场扫描、整窗全失败仍报 UE_API_MISMATCH、降级结构键常驻） | orphan.targets_found / map_not_orphaned | 真实工程假阳性抽检 >=20 条 |
 | 注册表枚举去重（`_dedupe_by_package` / `_export_object_path`：多导出包一包一条） | test_asset_enumeration_dedupe（7 用例：窗口挤占、类误标、`prefer_terms` 选代表导出、无 `object_path` 才回退 `package.leaf`、孤儿计数） | enumerate.scan_one_row_per_package / enumerate.opt_rows_unique_and_measurable | 5.0/5.1 无 `get_object_path` 的回退形状只有离线用例覆盖，待该版本真机复跑 |
-| `get_asset_metrics`（真大/假大+材质槽） | test_metrics_degrade / test_metrics_runtime / test_source_probe_guard（探针缓存与开关） | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat / mesh_material_slots | 真实美术资产压缩格式下 est 口径偏差；碰撞面数 5.4 `UStaticMesh` python 无访问器（绑定限制，见资产表 CalibMesh 行）|
+| `get_asset_metrics`（真大/假大+材质槽；立方图另回传 `source_layout`，#11 D） | test_metrics_degrade / test_metrics_runtime / test_source_probe_guard（探针缓存与开关） | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat / mesh_material_slots | 真实美术资产压缩格式下 est 口径偏差；碰撞面数 5.4 `UStaticMesh` python 无访问器（绑定限制，见资产表 CalibMesh 行）|
 | `list_level_actors`（compose） | test_actors_compose | compose.world_ge_1400 / cube_batching_opportunity | 真实 WP 关卡全载成本 |
 | `read_editor_log`（P2 指纹归一+资产归因+按会话切分） / `attribute_cook_errors` | test_logscan(+3 会话用例:多会话拆分/每会话计数/单会话不标多) / test_attribute | -（纯离线，真实工程日志直读验证 distinct 194->10、LogPackageName 196 合 1 组归因 195 资产） | 与真实 cook 日志联动的归因抽检 |
 | `scan_folder_assets`（目录级预算 by_dir） | test_folderscan(+5 用例:预算/深度/cap-truncated/子树基) | -（纯离线磁盘，无引擎 API，不需夹具靶；report 间接） | 真实大工程目录占比手感 |
@@ -343,13 +344,14 @@ HISM 折叠↔回滚）与 `verify_cook_chain`（cook 9 项 / package 10 项）�
   编辑器重启后 MCP 立刻拿到缺陷 #10 的新判定 `planned=1`/`no_op=3`）。
 - 池需求是**保守上界**（可流送纹理按整条 mip 链进池），不等于实际驻留；未配 `*PoolSize` 的工程
   `verdict=unknown` 是诚实降级，不是漏判。
-- **冷态源边长反推可能低估**（`source_side_exact=false` 时要当心）：Cube 的
-  `texture_source_memory` 与 BPP/面数/mip 链三者耦合，只靠反推会得到非 2 的幂边长。5.4 真实工程
-   `TC_HDR` 立方图实测：反推 2365（`runtime_mb=340`，basis=derived_estimate），载入后实测
-   `memory_bytes` 对应边长 4096（`runtime_mb=1024`，basis=resident_memory）——差 3 倍。
-   口径本身已诚实（`runtime_ledger` 实测优先 + `runtime_basis` 标注），但**读数前先看 basis**：
-   要准确值就让纹理先进编辑器内存（打开引用它的关卡/资产），或按 `est x ratio` 当下限读。
-   后续可加"Cube 源边长"真机靶改进反推（记 TODO，未擅自动口径）。
+- **源边长反推的等价类残余**（`source_side_exact=false` 时要当心）：源侧只有
+  `source_memory_bytes` 可读，边长 = sqrt(源内存 / (面积因子 x BPP))，多解是常态。#11 已把 Cube 的
+  两条存法定案并落进 D（`streaming.source_layout_from_memory`）：先按立方阵列 6xS^2xB 解，无 2 的幂解
+  再按 2:1 全景 2xS^2xB 解。那张 5.4 真实工程 `TC_HDR` 立方图（曾反推 2365、估 340MB，载入实测
+  1024MB）现在直接命中面边长 4096 + `source_layout=panorama_2to1`，3 倍低估归位。仍未解的是**同一假设
+  内部**的多解（S x sqrt(BPP) 为常数）：`exact=true` 只说明「与 2 的幂先验自洽」，不是边长被证明；
+  非 2 的幂边长（实测那张 3686）两假设都无解 -> 维持阀。读数前先看 `runtime_basis` 与 `size_basis`，
+  要准确值就让纹理先进编辑器内存（打开引用它的关卡/资产）。
 
 ## HISM 折叠的 5.4 真机口径（v1.5 PR-5，本轮实测）
 

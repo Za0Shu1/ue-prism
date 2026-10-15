@@ -16,6 +16,9 @@ pluginpack.ENGINE_MODULES 打包进引擎侧给 domain 用；server/rules 同源
   * 其余（可流送且非虚拟）-> 可流送 mip 视为可全量进池，pool_mb = 全链（上界）。
 - 收益三档各自单列（钳尺寸 / 虚拟化 / 改压缩）；合并值按池需求封顶。
   改压缩收益与钳尺寸收益有重叠，故不并入合并值。
+- 立方图双假设（#11 D）：Cube 的源存法有两种—立方阵列 6xS^2xB 与
+  2:1 全景 2xS^2xB。反推先试阵列（现口径），无 2 的幂解再试全景；两侧按「src 是否
+  含因子 3」互斥，容差内也不会互相抢真值。
 - 安全阀（#11）：源边长反推没过校验（source_side_exact=false，典型是冷态 Cube 的
   BPP/面数/mip 耦合多解）时只撤"依赖边长的金额报价"，不撤发现与动作——
   clamp/compression 两档恒撤（边长直接进算式），vt/streaming_release 仅在无实测时撤
@@ -27,12 +30,12 @@ from __future__ import annotations
 import os
 import re
 
-POOL_MODEL_VERSION = "v3-size-verification-aware"
+POOL_MODEL_VERSION = "v4-cube-dual-hypothesis"
 POOL_MODEL = {
     "version": POOL_MODEL_VERSION,
     "runtime_basis": "runtime_ledger: 实测 memory_bytes 优先(已含真实格式)，否则 est_runtime_bytes x 格式倍率",
     "size_basis": "source_width (源盘反推，编辑器冷热态稳定)；条目级 size_basis 标注本张实际口径",
-    "source_size_basis": "source_memory 反推：候选 BPP{4,8,2,1,16,32,64} x 面数，取 2 的幂解",
+    "source_size_basis": "source_memory 反推：候选 BPP{4,8,2,1,16,32,64} x 面积因子（立方图双假设：阵列 6xS^2 / 2:1 全景 2xS^2，其余类用面数），取 2 的幂解",
     "size_verification": "source_side_exact=false -> 撤金额(clamp/compression 恒撤; "
                          "vt/streaming_release 仅无实测时撤)，保留 clamp_to 与 actions; "
                          "条目加 size_unverified flag，汇总加 size_unverified_* 不确定度",
@@ -57,6 +60,17 @@ HDR_BYTES_PER_TEXEL = 8.0
 SRC_BYTES_PER_TEXEL = 4
 SRC_BPP_CANDIDATES = (4, 8, 2, 1, 16, 32, 64)
 SRC_SIDE_TOLERANCE = 0.02      # 反推整尺寸回算源内存的允许相对偏差
+
+# 立方图源的两条存法假设（#11 B2 真实工程只读复测定案，16/16 张零例外）：
+#  H1 立方阵列源：面积因子 = 面数（6），实测 201,326,592 = 6 x 2048^2 x 8B，÷6 余 0
+#  H2 2:1 全景源（多为 RGBE 4B/px）：面积因子 = 2，实测 134,217,728 = 2 x 4096^2 x 4B
+# 互斥性：BPP 候选与边长解都是 2 的幂，H1 解含因子 3、H2 解不含；容差内也抢不到
+# 同一条 src（2^m/3 恒偏离 1 达 33%），所以先 H1 后 H2 不会把既往正确的金额推错。
+CUBE_FACES = 6
+PANORAMA_AREA_FACTOR = 2
+LAYOUT_FACE_STACK = "face_stack"
+LAYOUT_CUBE_ARRAY = "cube_array"
+LAYOUT_PANORAMA_2TO1 = "panorama_2to1"
 
 # 5.4 实证：Cube/Volume 不支持流式虚拟纹理（编辑器勾选框置灰）；2D Array 可行。
 VT_UNSUPPORTED_HINTS = ("cubetexture", "texturecube", "volumetexture", "texturevolume")
@@ -134,9 +148,15 @@ def is_pow2(n):
     return n > 0 and (n & (n - 1)) == 0
 
 
+def is_cube_class(cls_name):
+    """立方图判定（与 faces_for 同源）：只有立方图需要双假设，
+    Texture2DArray 的 6 个 slice 不算—面数相同但源存法不是立方。"""
+    return "cube" in norm_class(cls_name)
+
+
 def faces_for(cls_name, array_size=None):
     """一张纹理的"面数"：Cube 6 面，Texture2DArray 再乘 slice 数。"""
-    faces = 6 if "cube" in norm_class(cls_name) else 1
+    faces = CUBE_FACES if is_cube_class(cls_name) else 1
     try:
         n = int(array_size or 1)
     except (TypeError, ValueError):
@@ -144,36 +164,64 @@ def faces_for(cls_name, array_size=None):
     return faces * max(n, 1)
 
 
-def source_side_from_memory(src_mem_bytes, faces=1, bpp_candidates=None):
-    """由 source_memory_bytes 反推源边长（源位图不带 mip）。
+def source_layout_from_memory(src_mem_bytes, faces=1, bpp_candidates=None, cube=False):
+    """由 source_memory_bytes 反推源边长（源位图不带 mip）；立方图可走双假设。
 
-    解不唯一时取"结果恰是 2 的幂"的那档 BPP（UE 源尺寸基本都是 POT），
-    全不中才回落到首选 4B/px 的四舍五入值并用 exact=False 标注是估计。
-    返回 (side, bytes_per_texel, faces, exact)；无解 -> (0, 0, faces, False)。
+    候选面积因子：面数（H1 立方阵列 / 普通类），立方图再追加 2（H2 2:1 全景）。
+    取「结果恰是 2 的幂」的那档 BPP；全不中才回落到首选 4B/px 的四舍五入
+    值并用 exact=False 标注是估计。
+    side 恒是**面边长**、faces 恒是**运行时面数**：全景命中时源面积只有
+    2xS^2，运行时仍按 6 面算——这正是把 hDRI 类低估 3 倍的账纠回来的地方。
+    无解 -> side=0 / exact=False / layout=None。
+    fallback（无 2 的幂解）仍取第一条假设：那些数字只用来标注发现，金额恒被阀撤回，
+    不用一条更想当的假设去伪装精确。
     """
     faces_n = max(to_px(faces), 1)
+    empty = {"side": 0, "bytes_per_texel": 0, "faces": faces_n,
+             "exact": False, "layout": None, "area_factor": 0.0}
     try:
         total = float(src_mem_bytes)
     except (TypeError, ValueError):
-        return 0, 0, faces_n, False
+        return empty
     if total <= 0:
-        return 0, 0, faces_n, False
+        return empty
     cands = tuple(bpp_candidates) if bpp_candidates else SRC_BPP_CANDIDATES
-    rows = []
-    for bpp in cands:
-        area = total / (float(bpp) * faces_n)
-        if area <= 0:
-            continue
-        side = int(round(area ** 0.5))
-        if side <= 0:
-            continue
-        err = abs((side * side * float(bpp) * faces_n) - total) / total
-        if is_pow2(side) and err <= SRC_SIDE_TOLERANCE:
-            return side, int(bpp), faces_n, True
-        rows.append((side, int(bpp)))
-    if rows:
-        return rows[0][0], rows[0][1], faces_n, False
-    return 0, 0, faces_n, False
+    hypotheses = [(float(faces_n), LAYOUT_CUBE_ARRAY if cube else LAYOUT_FACE_STACK)]
+    if cube:
+        hypotheses.append((float(PANORAMA_AREA_FACTOR), LAYOUT_PANORAMA_2TO1))
+    fallback = None
+    for factor, layout in hypotheses:
+        rows = []
+        for bpp in cands:
+            area = total / (float(bpp) * factor)
+            if area <= 0:
+                continue
+            side = int(round(area ** 0.5))
+            if side <= 0:
+                continue
+            err = abs((side * side * float(bpp) * factor) - total) / total
+            if is_pow2(side) and err <= SRC_SIDE_TOLERANCE:
+                return {"side": side, "bytes_per_texel": int(bpp),
+                        "faces": faces_n, "exact": True,
+                        "layout": layout, "area_factor": factor}
+            rows.append((side, int(bpp)))
+        if rows and fallback is None:
+            fallback = (rows[0][0], rows[0][1], layout, factor)
+    if fallback:
+        return {"side": fallback[0], "bytes_per_texel": fallback[1],
+                "faces": faces_n, "exact": False,
+                "layout": fallback[2], "area_factor": fallback[3]}
+    return empty
+
+
+def source_side_from_memory(src_mem_bytes, faces=1, bpp_candidates=None, cube=False):
+    """历史 4 元组口径 (side, bytes_per_texel, faces, exact)。
+
+    数学与布局判定只有 source_layout_from_memory 一份，这里只做投影，
+    避免两套口径漂移；要区分命中了哪条假设直接用 layout 字典版。
+    """
+    got = source_layout_from_memory(src_mem_bytes, faces, bpp_candidates, cube)
+    return got["side"], got["bytes_per_texel"], got["faces"], got["exact"]
 
 
 def effective_px(source_px, max_size_px):

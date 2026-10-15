@@ -497,7 +497,7 @@ def test_aggregate_reports_size_uncertainty_and_withheld_quotes():
     assert agg["size_unverified_permanent_mb"] == icon["permanent_mb"]
     assert agg["savings_withheld_count"] == 2
     assert agg["clamp_savings_mb"] == warm["clamp_savings_mb"]   # None 按 0 计入，不猜数
-    assert agg["model"]["version"] == "v3-size-verification-aware"
+    assert agg["model"]["version"] == "v4-cube-dual-hypothesis"
     assert "size_verification" in agg["model"]
 
 
@@ -528,6 +528,64 @@ def test_source_side_answer_always_reproduces_source_memory():
                 assert got_faces == faces, (faces, side, bpp)
                 err = abs(got_side * got_side * got_bpp * faces - total) / float(total)
                 assert err <= st.SRC_SIDE_TOLERANCE, (faces, side, bpp, got_side, got_bpp, err)
+
+
+# ---------- #11 D：立方图双假设（阵列 6xS^2 vs 2:1 全景 2xS^2）----------
+
+
+def test_cube_dual_hypothesis_fixes_panorama_underestimate():
+    """真实工程取证（16/16 张立方零例外）定案的两种源存法。那张 2:1 全景立方源内存
+    134,217,728 = 2 x 4096^2 x 4B：按面数 6 反推只得 2365 且走阀，运行时被低估 3 倍；
+    D 命中全景假设后给面边长 4096 + exact=True，而 faces 仍按 6 面（运行时口径不变）。"""
+    src = 2 * 4096 * 4096 * 4
+    assert st.source_side_from_memory(src, 6)[:2] == (2365, 4)      # 旧口径（不启用 D）
+    got = st.source_layout_from_memory(src, 6, cube=True)
+    assert (got["side"], got["bytes_per_texel"], got["exact"], got["layout"]) == \
+        (4096, 4, True, st.LAYOUT_PANORAMA_2TO1)
+    assert got["faces"] == 6 and got["area_factor"] == st.PANORAMA_AREA_FACTOR
+
+
+def test_cube_array_truth_keeps_first_hypothesis():
+    """阵列源（src 含因子 3）必须由 H1 先解释：现口径已正确的金额不被 D 改动。"""
+    got = st.source_layout_from_memory(6 * 2048 * 2048 * 8, 6, cube=True)
+    assert (got["side"], got["bytes_per_texel"], got["layout"], got["exact"]) == \
+        (2048, 8, st.LAYOUT_CUBE_ARRAY, True)
+    plain = st.source_layout_from_memory(6 * 2048 * 2048 * 8, 6, cube=False)
+    assert (plain["side"], plain["bytes_per_texel"], plain["exact"]) == \
+                (got["side"], got["bytes_per_texel"], got["exact"])
+    assert plain["layout"] == st.LAYOUT_FACE_STACK   # 只有布局标签会多说一句话
+
+
+def test_the_two_cube_hypotheses_cannot_both_claim_the_same_source():
+    """D 的安全前提（穷举）：候选 BPP x 2 的幂边长下，全景真值永不被阵列解释
+    （H1-only 无 exact），阵列真值也永不被 D 改口——两侧按「src 是否含因子 3」互斥。"""
+    for side in (128, 256, 512, 1024, 2048, 4096, 8192):
+        for bpp in st.SRC_BPP_CANDIDATES:
+            pano = 2 * side * side * bpp
+            assert st.source_layout_from_memory(pano, 6, cube=False)["exact"] is False, (side, bpp)
+            assert st.source_layout_from_memory(pano, 6, cube=True)["layout"] == \
+                st.LAYOUT_PANORAMA_2TO1, (side, bpp)
+            arr = 6 * side * side * bpp
+            assert st.source_layout_from_memory(arr, 6, cube=True)["layout"] == \
+                st.LAYOUT_CUBE_ARRAY, (side, bpp)
+
+
+def test_cube_panorama_still_valves_when_side_is_not_pow2():
+    """非 2 的幂全景（实测那张边长 3686）：两假设都没有 2 的幂解 -> 维持阀撤金额；
+    fallback 仍取第一条假设的估计值，不拿更"像"的假设伪装精确。"""
+    got = st.source_layout_from_memory(2 * 3686 * 3686 * 4, 6, cube=True)
+    assert got["exact"] is False and got["area_factor"] == 6.0
+    assert got["layout"] == st.LAYOUT_CUBE_ARRAY
+
+
+def test_dual_hypothesis_only_applies_to_cube_class():
+    """Texture2DArray 的 6 个 slice 面数也是 6，但没有全景存法：cube=False 行为一字不变。"""
+    src = 6 * 2048 * 2048 * 4
+    assert st.faces_for("Texture2DArray", 6) == 6
+    assert st.is_cube_class("Texture2DArray") is False
+    assert st.is_cube_class("CubeTexture") is True
+    assert st.source_layout_from_memory(src, 6, cube=False)["layout"] == st.LAYOUT_FACE_STACK
+    assert st.source_side_from_memory(src, 6) == (2048, 4, 6, True)
 
 
 def test_source_side_sqrt2_band_can_claim_exact_while_being_wrong():

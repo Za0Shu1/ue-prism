@@ -206,9 +206,12 @@ def _derive_texture_geometry(obj, m):
     仅用于真大/假大判定与 width 缺失时的兜底，标注 size_derived 供消费方辨别。
 
     源位图不一定是 RGBA8：HDR/RGBA16 是 8B/px、FP32 是 16B/px，Cube 还要摊 6 面。
+    立方图走双假设（#11 D）：源可能是立方阵列 6xS^2xB，也可能是 2:1 全景
+    2xS^2xB；后者按面数反推会把 4096 的面边长推成 2365，运行时低估 3 倍。
     一律按 4B/px 反推会把 6x2048^2x8B 的立方图推成 2896 这种假尺寸（5.4 真实工程
-    实测），进而编出"钳到 2048 省 96MB"的假收益。故走 streaming.source_side_from_memory
-    的多候选 BPP + "2 的幂"校验，并把命中的 BPP 与 exact 标记一起回传，便于核对。
+    实测），进而编出"钳到 2048 省 96MB"的假收益。故走 streaming.source_layout_from_memory
+    的多候选 BPP + "2 的幂"校验（立方图再叠双假设），并把命中的 BPP、exact 与存法
+    布局 source_layout 一起回传，便于核对。
     """
     cls_name = None
     try:
@@ -216,16 +219,23 @@ def _derive_texture_geometry(obj, m):
     except Exception:
         pass
     faces = _faces_of(cls_name, m.get("array_size"))
+    cube = _st.is_cube_class(cls_name)
     side = 0
     bpp = 0
     exact = False
+    layout = None
     src_mem = m.get("source_memory_bytes")
     if src_mem:
-        side, bpp, _faces, exact = _st.source_side_from_memory(src_mem, faces)
+        got = _st.source_layout_from_memory(src_mem, faces, cube=cube)
+        side, bpp, exact, layout = (got["side"], got["bytes_per_texel"],
+                                    got["exact"], got["layout"])
     if side:
         m["source_width"] = side
         m["source_bytes_per_texel"] = bpp
         m["source_side_exact"] = bool(exact)
+        if cube:
+            # 命中了哪条存法假设（cube_array / panorama_2to1），便于核对金额口径
+            m["source_layout"] = layout
         cur = int(m.get("width") or 0)
         if not cur or cur <= 64:
             # 冷态直读是占位值(<=64)：width 用源反推兜底

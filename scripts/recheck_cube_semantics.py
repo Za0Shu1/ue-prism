@@ -245,7 +245,8 @@ def _main():
         cls = it.get("class") or mm.get("class") or ""
         faces = _faces_for(st, cls, it)
         src = mm.get("source_memory_bytes")
-        derived = st.source_side_from_memory(src, faces or 1) if src else None
+        lay = st.source_layout_from_memory(src, faces or 1, cube=True) if src else None
+        derived = [lay["side"], lay["bytes_per_texel"], lay["faces"], lay["exact"]] if lay else None
         obj, rec = _import_record(pkg)
         row = {"package": pkg, "uasset_bytes": sz, "class": cls,
                "compression": str(mm.get("compression") or ""),
@@ -255,7 +256,9 @@ def _main():
                "array_size": mm.get("array_size"),
                "derived_by_domain": [mm.get("source_width"),
                                      mm.get("source_bytes_per_texel"),
-                                     mm.get("source_side_exact")],
+                                     mm.get("source_side_exact"),
+                                     mm.get("source_layout")],
+               "derived_layout": (lay or {}).get("layout"),
                "faces_used": faces,
                "derived": (list(derived) if derived else None),
                "recorded_src": rec}

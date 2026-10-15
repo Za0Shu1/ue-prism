@@ -135,6 +135,25 @@ def test_derive_cube_hdr_uses_8bpp_not_rgba8():
     assert mc["est_runtime_bytes"] == int(2048 * 2048 * 6 * 1.33)
 
 
+def test_derive_cube_panorama_reports_face_side_4096():
+    """#11 D 落到度量层：2:1 全景立方的 source_width 必须是面边长 4096（旧口径 2365），
+    并回传命中的存法 source_layout；运行时估算按 6 面，不再低估 3 倍。"""
+    mc = {"source_memory_bytes": 2 * 4096 * 4096 * 4}
+    M._derive_texture_geometry(_FakeTex("TextureCube"), mc)
+    assert mc["source_width"] == 4096
+    assert mc["source_side_exact"] is True
+    assert mc["source_layout"] == "panorama_2to1"
+    assert mc["est_runtime_bytes"] == int(4096 * 4096 * 6 * 1.33)
+
+
+def test_derive_slice_array_is_not_treated_as_cube():
+    """6 个 slice 的 2D Array 面数同为 6，但不走双假设：不标 layout、答案与旧口径一致。"""
+    mc = {"source_memory_bytes": 6 * 2048 * 2048 * 4, "array_size": 6}
+    M._derive_texture_geometry(_FakeTex("Texture2DArray"), mc)
+    assert mc["source_width"] == 2048 and mc["source_side_exact"] is True
+    assert "source_layout" not in mc
+
+
 def test_derive_marks_inexact_side_when_not_pow2():
     m = {"source_memory_bytes": 3000 * 3000 * 4}
     M._derive_texture_geometry(_FakeTex("Texture2D"), m)

@@ -620,10 +620,14 @@ def run_all(bus_dir, project_dir, roundtrip=False):
         items[i["package_name"]] = i
     cube = items.get(F + "/T_CalibCube", {})
     cm = cube.get("metrics") or {}
-    r.check("metrics.cube_measurable", bool(cm.get("width")),
-            "w=%s derived=%s tried=%s" % (cm.get("width"),
-                                          cm.get("size_derived"),
-                                          cube.get("tried")))
+    lay = cm.get("source_layout")
+    # #11 D：立方图反推必须回传命中的存法（阵列/全景二选一）；无可信解时允许缺
+    lay_ok = lay in ("cube_array", "panorama_2to1") or cm.get("source_side_exact") is False
+    r.check("metrics.cube_measurable", bool(cm.get("width")) and lay_ok,
+            "w=%s derived=%s layout=%s exact=%s tried=%s" % (cm.get("width"),
+                                                             cm.get("size_derived"),
+                                                             lay, cm.get("source_side_exact"),
+                                                             cube.get("tried")))
     big = items.get(F + "/T_BigNoise", {})
     big_est = ((big.get("metrics") or {}).get("est_runtime_bytes") or 0)
     r.check("metrics.real_4k_is_runtime_heavy",

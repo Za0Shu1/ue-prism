@@ -204,6 +204,8 @@ def get_asset_metrics(asset_paths: Annotated[str, Field(description="多个 /Gam
     (runtime_heavy=真显存/帧大户 | disk_only_bloat=源盘膨胀运行时被限死 | normal | unknown)
     与 is_runtime_heavy；纹理另采 compression/virtual_texture/max_size/array_size，
     以及源边长可信度 source_side_exact / size_basis（false=反推多解，池收益会被安全阀撤回）。
+    立方图另回传 source_layout：cube_array=阵列源 6xS^2 / panorama_2to1=2:1 全景源 2xS^2
+    （#11 D 双假设，POOL_MODEL v4）——全景类按面数反推会把面边长推小、运行时低估 3 倍。
     Loads assets into editor memory as a side effect - keep max_assets small. Needs live bridge.
     """
     bus_dir, _pd, err = _resolve(project)
