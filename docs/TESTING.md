@@ -19,8 +19,8 @@
 
 | 靶资产 | 真值 | 校验点 |
 |---|---|---|
-| `T_BigNoise` | 4096^2 源，显式 `MaxTextureSize=0`（不限幅） | `runtime_verdict=runtime_heavy`（~21MB 估算），`texture_size` 保持 error；v1.5 兼作钳尺寸写靶（钳到 2048→回读→还原 0） |
-| `T_FakeBig` | 同 4K 源，MaxSize=128 | `disk_only_bloat` + `capped_by_max_size`；`asset_size_top` 证据链带双证据降档 |
+| `T_BigNoise` | 4096^2 源，显式 `MaxTextureSize=0`（不限幅）+ **显式关 VT**（5.3 导入按 `AutoVTSize` 自动开、5.4 不开；不钉住则 5.3 上 `already_virtual` 会吞掉钳/VT 候选） | `runtime_verdict=runtime_heavy`（~21MB 估算），`texture_size` 保持 error；v1.5 兼作钳尺寸写靶（钳到 2048→回读→还原 0）与 `need_clamp` / VT `planned` 正样本 |
+| `T_FakeBig` | 同 4K 源，MaxSize=128（克隆自 `T_BigNoise`，同样显式关 VT） | `disk_only_bloat` + `capped_by_max_size`；`asset_size_top` 证据链带双证据降档；不得出现在 `need_clamp` |
 | `T_CalibCube` | 引擎 TextureCube 副本 | Cube 尺寸可由源内存反推（`source_width>0`；5.4 实证无任何尺寸 API 时的兜底路径）；v1.5 兼作 VT 负控（Cube 不支持流式虚拟纹理 → 必进 `skipped`/`vt_blocked`） |
 | `T_CalibIcon` | `T_Used1K` 副本 + `TC_EDITORICON` | v1.5 禁流送格式真值：`format_class=no_stream`→`pool_mb=0`/`permanent_mb>0`（恒常驻池外），**不得**被当成 4B/px 未压缩虚报收益 |
 | `T_CalibHdr` | 引擎 TextureCube 副本 + `TC_HDR`（GUI StartupScripts 里设并回读） | 高位深真值：5.4 实测 `memory_bytes/est_runtime_bytes ≈ 8.5`（TC_HDR **不做块压缩**，按 8B/px 常驻）→ `format_class=high_bpp`、`runtime_mb==实测`（**不得再乘倍率**）、`actions` 不含 `set_compression`（改格式丢 HDR 动态范围，属美术决策）、`metrics` 与 `scan` 两本账同值 |
@@ -89,7 +89,10 @@
 - `matrix.json` 另存 `opt_texture` / `opt_nanite` / `opt_instancing` 三段（含 api/tried），
   跨版本各跑一次即得 **VT / MaxSize / Nanite 三处属性签名 + HISM 探针**的兼容矩阵。
 - ✅ 5.4.4 已真机验收 **50/50 全 PASS**（2026-10-10，夹具 errors=0，矩阵/日志留本地 `_internal/`）。
-  ⚠️ 5.3 尚未带上这 28 项复跑，跨版本矩阵仍欠 5.3 一行。
+- ✅ **5.3.2 补跑 v1.5 新增项：59/59 全 PASS**（2026-10-15，独立沙箱工程 `PrismCompat53` +
+  `--hism-roundtrip`：1500 散装 Cube -> 1 个 HISM（实例 1500）-> 回滚 1500，两侧真值都对得上）。
+- ✅ 同一轮夹具（含显式关 VT 的真值钉子）在 **5.4.4 沙箱工程 `PrismCompat54` 复验 59/59**。
+  ⚠️ 5.5/5.8/5.1 仍欠：本机只剩 5.3/5.4 引擎（注册表里的 5.1/5.5 是卸载残留）。
 - ✅ 2026-10-14 在真实大工程（9242 资产 / 14.4GB，3163 纹理 + 1898 网格）复跑 **59/59 全 PASS**，
   且**同一编辑器会话连跑两轮**都绿。真实工程照出两处只在真机才会暴露的缺陷：
   注册表**多导出包按导出重复计数**（一个 HLOD 包占 76 格、400 格纹理窗口里 125 项"读不到尺寸"、
@@ -97,11 +100,23 @@
 
 
 
-## v1.5 优化族的真机验收（5.4 已跑，5.3 待补）
+## v1.5 优化族的真机验收（5.3 / 5.4 均已跑）
 
-本轮在有编辑器的机器上完成：L0 394 用例（393 passed / 1 skipped）全绿，5.4.4 夹具
-**59/59 真机全 PASS**。合并/发版前仍须在 UE 5.3（以及 5.5/5.8 等）各跑一次 `run_fixture`
-并归档 `matrix.json`：
+L0 394 用例（393 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
+各 59/59 全 PASS**（2026-10-15，两具独立沙箱工程）。5.3 这一行照出一处只在跨版本时才会露脸的
+真值坑，产品代码不用改，改的是夹具：
+
+- **5.3 的贴图导入器会按 `UTextureImportSettings.AutoVTSize`（源像素 ≥ 4096×4096）自动把大贴图置成
+  `VirtualTextureStreaming=true`，5.4 起该行为取消**。于是原样导入的 4K 靶在 5.3 一进门就是“已是虚拟
+  纹理”，`clamp_to` / `need_clamp` / VT `planned` 三条候选一起消失 -> `streaming.clamp_target_planned`、
+  `streaming.vt_write_blocks_cube` 红。修法不是放宽断言，而是把“未开 VT 的 4K 大图”这块真值显式钉住
+  （`gen_assets_cmdlet._pin_virtual_off`：写 + 回读 + 证据进 `assets_summary.json`），两版各 59/59。
+  给用户的同一条读数：5.3 工程里大图 `already_virtual` 多半是引擎导入时替美术开的，不是美术勾的。
+- 5.3 的 `LevelEditorSubsystem.new_level` 只吃 1 个参数（5.4 的 `new_level(dest, False)` 在 5.3 抛
+  `takes at most 1 argument`），夹具多候选兜底命中；HISM 路线 A（裸 Actor + `new_object` HISM 根组件）
+  在 5.3/5.4 同样写满 1500 实例——5.4 钉死的折叠路线不是 5.4 专属。
+
+新增引擎版本（5.5/5.8/5.1…）时仍按同样姿势各跑一次 `run_fixture` 并归档 `matrix.json`：
 
 ```bash
 python scripts/calib_fixture/run_fixture.py --project <P> --editor <UnrealEditor.exe> \
@@ -145,21 +160,27 @@ cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编
 
 ## 引擎兼容矩阵（实测）
 
-同一套 `run_fixture`（56 项：域层 `unreal` API + 规则 + 枚举不变量）与 `verify_cook_chain`（cook 9 项 / package 10 项）在不同引擎版本各跑一次即成矩阵。当前实测：
+同一套 `run_fixture`（59 项：域层 `unreal` API + 规则 + 枚举不变量 + v1.5 优化族属性读写往返 +
+HISM 折叠↔回滚）与 `verify_cook_chain`（cook 9 项 / package 10 项）在不同引擎版本各跑一次即成矩阵。当前实测：
 
 | 引擎 | L2 夹具 run_fixture | cook 全链路 | package 全链路 |
 |---|---|---|---|
-| UE 5.4.4 | **59/59**（2026-10-14 真实大工程复跑、同会话两轮；含 v1.5 优化族 28 项 + HDR 高位深/材质实例/压缩同名 no_op 靶 + 一包一条/冲突拒写 3 项不变量；errors=0。2026-10-10 首轮 50/50） | 9/9（695 包/0 error） | Development + Shipping 各 10/10 |
-| UE 5.3.2 | 22/22（v1.5 新增 28 项**待复跑**，含 HDR 高位深/材质实例/压缩同名 no_op 靶） | 9/9 | Development + Shipping 各 10/10 |
+| UE 5.4.4 | **59/59**（2026-10-14 真实大工程复跑、同会话两轮；含 v1.5 优化族 28 项 + HDR 高位深/材质实例/压缩同名 no_op 靶 + 一包一条/冲突拒写 3 项不变量；errors=0。2026-10-10 首轮 50/50。2026-10-15 在独立沙箱 `PrismCompat54` 用加了显式关 VT 钉子的夹具复验 **59/59**，含 `--hism-roundtrip`） | 9/9（695 包/0 error） | Development + Shipping 各 10/10 |
+| UE 5.3.2 | **59/59**（2026-10-15 沙箱 `PrismCompat53` 补跑 v1.5 新增项，含 `--hism-roundtrip` 真折叠 1500→1 HISM(实例 1500)→回滚 1500。首跑红两条 `streaming.clamp_target_planned` / `streaming.vt_write_blocks_cube`——根因是 5.3 导入器按 `AutoVTSize` 替大图开了 VT，夹具钉成真值后转绿，产品代码未改） | 9/9 | Development + Shipping 各 10/10 |
 
 - 域层跨版本靠多签名 `try` 兜底，`tried` 实测两版一致：`used_by`/`get_dependencies`=`name+opts`；纹理尺寸无直读 API → `blueprint_get_memory_size` + 源盘反推；5.3/5.4 `EditorAssetLibrary.move_asset` 皆 `AttributeMissing` → 走 `rename_asset` 兜底。
+- 5.3.2 实测签名（本轮补跑）：`LevelEditorSubsystem.new_level` 只吃 1 个参数（5.4 的
+  `new_level(dest, False)` 在 5.3 抛 `takes at most 1 argument`，夹具多候选兜底命中）；HISM 路线 A
+  与 5.4 走同一条（裸 Actor + `new_object` HISM 根组件，`get_instance_count` 回读 1500）；Nanite 仍命中
+  `nanite_settings.enabled`；`EditorAssetLibrary.move_asset` 依旧 `AttributeMissing` → `rename_asset` 兜底。
 - 夹具生成器坑（已修）：**UE 5.3 的 Interchange 导入忽略 `AssetImportTask.destination_name`**（包名由源文件名决定），复用同一 PNG 造改名基准贴图（`T_CalibRef/Broken/Stub`）在 5.3 建不出来，连带 5 项 refs/copy 校验失败。修法是这些改名基准改走 `EditorAssetLibrary.duplicate_asset`（显式目标名，跨版本稳）→ 5.3/5.4 均回到 22/22。
 - package 的 C++ 宿主坑（已内化）：`-build` 带 `-nocompileeditor`，cook 阶段用编辑器进程加载工程模块——给 C++ 工程跑 `--mode package` 前须先各编一次 **Editor 与 Game 两个 target**，否则 cook 报 `The game module '<X>' could not be found` 直接失败（蓝图工程无此问题，但蓝图工程又没有 Game target 可 `-build`，故 package 测不了）。本轮 5.3 package 用一次性 C++ 宿主验证通过。
 - 5.4.4 实测签名命中（本轮夹具矩阵）：Nanite 走 `nanite_settings.enabled`；MaxSize 走
   `set_editor_property(max_texture_size)`；材质混合模式走 `get_blend_mode()`；`used_with_nanite`
   材质本体直读、材质实例必须 `get_base_material()>used_with_nanite`；纹理尺寸无直读 API（Cube 全靠源盘反推）。
 - 本机覆盖状态：**5.4.4 夹具 59/59 + cook 9/9 + package Dev/Shipping 各 10/10**；
-  5.3.2 仍是旧 22 项全绿，**v1.5 优化族与 HDR 台账未在 5.3 复跑**。更多版本（5.5/5.8 等）在其他机器补跑。
+  **5.3.2 夹具 59/59（2026-10-15 补跑，v1.5 优化族与 HDR 台账已在 5.3 真机钉住）**。
+  更多版本（5.5/5.8/5.1/5.0）须在别的机器补跑——本机注册表里的 5.1/5.5 是卸载残留，只剩 5.3/5.4 两套引擎。
 
 ## 工具覆盖矩阵（当前 30 个 MCP 工具）
 

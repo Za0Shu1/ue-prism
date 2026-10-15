@@ -1,10 +1,14 @@
-# TODO — 纹理/Nanite/合批 三类优化功能（计划中，未实施）
+# TODO — 纹理/Nanite/合批 三类优化功能（v1.5 已落地，5.3/5.4 矩阵达标）
 
 > 记录于 2026-10-08；2026-10-09 实现 PR-1/2/3 + PR-4 只读部分；2026-10-10 在一个新导入大批
 > 美术资源的 UE 5.4.4 测试工程上完成 **L2 50/50 全 PASS + L3 真实工程抽检**，修掉真机暴露的
 > 4 个缺陷（HDR 高位深台账、材质实例 Nanite 标志、日志归因噪音、压缩同名误判为待改），
 > 另记 1 个未修口径（冷态 Cube 源边长反推，见下「真机复盘」）。
-> 剩余：PR-4 路线 A（真折叠 HISM，见 D2）、5.3 矩阵补跑 v1.5 新增 28 项。
+> 2026-10-14 补上 **PR-4 路线 A**（`opt_collapse_hism` 真折叠 + 回滚清单 + `--hism-roundtrip`
+> 真机往返），5.4.4 夹具 **59/59 全 PASS** + 真实大工程复跑。2026-10-15 **补跑 UE 5.3.2：59/59 全
+> PASS**（并在 5.4.4 沙箱用同一轮夹具复验 59/59，顺带钉住 5.3 导入自动开 VT 的真值坑，见复盘 #12）。
+> 剩余：5.5/5.8/5.1 等版本各补一行矩阵（本机只剩 5.3/5.4 引擎）；未修口径 #11（冷态 Cube 源边长
+> 反推）待拍板。
 > 触发来源：对 UE 5.3 工程 ProjectA 的实测分析（详见会话），暴露三类可产品化的优化点。
 
 ## 背景（ProjectA 实测坐实的痛点）
@@ -17,9 +21,11 @@
 - [x] **D1 命名**：新增 `opt_` 族（纯优化写入：降尺寸/开 VT/改压缩/开 Nanite），`fix_` 保留给
   纠错（`fix_nanite_translucent`/`fix_broken_references`），`migrate_` 给搬移。`AGENTS.md`
   「写操作命名」已补一行。
-- [x] **D2 HISM 合批**：走**路线 B**——`analyze_instancing` 只读，`export=True` 仅把方案 JSON
-  原子写到 `<bus>/plans/`，绝不碰关卡 Actor。**路线 A（真折叠成 HISM）未实现**：UE 对关卡
-  Actor 级改动没有事务回滚，需单独拍板安全网（VCS 前置检查？另存关卡副本？）后再开写 PR。
+- [x] **D2 HISM 合批**：**路线 B**（`analyze_instancing` 只读，`export=True` 把方案 JSON 原子写到
+  `<bus>/plans/`，绝不碰关卡 Actor）与**路线 A**（`opt_collapse_hism` 真折叠）都已落地。路线 A 的
+  安全网：默认 `mode=plan` 不动场景 + 双钥才折叠 + 落回滚清单 JSON（`mode=restore` 按清单重建源
+  Actor 并销毁 HISM）+ 强提示「先提交 VCS 或另存关卡副本」——UE 对关卡改动无事务回滚，碰撞/光照/
+  蓝图绑定不承诺复原。
 - [x] **D3 节奏**：照原计划 PR-1 只读 → PR-2 纹理写 → PR-3 Nanite 写 → PR-4 只读部分。
 
 ## 实现落点（2026-10-09）
@@ -27,14 +33,14 @@
   domain 与 `rules.py` 同源取数，免得「工具报 8GB、报告报 6GB」两套账。`rules.py` 不得
   import `prism.domain.*`，需要同源就把数学放这种中立模块。
 - domain 新增 `optutil.py`（通用双钥写骨架 `drive`：守卫→解析目标→inspect→dry/execute→
-  save→诚实计数）、`opt_texture.py`、`opt_nanite.py`、`opt_instancing.py`；已登记
+  save→诚实计数）、`opt_texture.py`、`opt_nanite.py`、`opt_instancing.py`、`opt_hism.py`（路线 A）；已登记
   `pluginpack.ENGINE_MODULES`（引擎侧闭包）。
 - 收益分两本账：`est_savings_mb`（池/显存）与 `est_permanent_release_mb`（释放恒常驻）不合并。
   `TC_EDITOR_ICON` 系是「无 mip+禁流送→整张恒常驻池外」，不是「4B/px 未压缩」——开 VT 对它
   无从谈起，钳尺寸仍有效；改回 `TC_Default` 的收益是变可流送，别按省 3/4 池报价。
-- server 新增 8 个工具（`scan_texture_streaming`、`opt_texture_set_virtual`、
+- server 新增 9 个工具（`scan_texture_streaming`、`opt_texture_set_virtual`、
   `opt_texture_clamp_max_size`、`opt_texture_set_compression`、`scan_nanite_candidates`、
-  `opt_mesh_set_nanite`、`fix_nanite_translucent`、`analyze_instancing`），共 29 个。
+  `opt_mesh_set_nanite`、`fix_nanite_translucent`、`analyze_instancing`、`opt_collapse_hism`），共 30 个。
 - 规则 `get_perf_report` 7→12 条：+`texture_streaming_overflow`（含 ini 池对照）、
   `oversized_mip`、`uncompressed_texture`、`nanite_translucent_conflict`（离线直读编辑器日志）、
   `drawcall_batching`；三档 PROFILES 各配阈值（mobile 更敏感）。
@@ -73,6 +79,12 @@
   1024MB（`resident_memory`），差 3 倍。根因：`texture_source_memory` 里 BPP/面数/mip 链三者耦合，
   非 2 的幂解也满足误差容限（`source_side_exact=false` 已如实标注，不算谎报）。修法要先造"已知边长
   的 Cube 真机靶"跨版本校准，属独立决策——本轮不动 `streaming` 数学，读数一律先看 `runtime_basis`。
+- **#12 5.3 导入器把 4K 大图自动开成 VT**（2026-10-15 补跑 5.3 时红两条：
+  `streaming.clamp_target_planned` / `streaming.vt_write_blocks_cube`）：5.3 的 `UTextureImportSettings.AutoVTSize`
+  让源像素 ≥ 4096×4096 的贴图一进工程就 `VirtualTextureStreaming=true`（5.4 起取消该行为），于是钳尺寸/VT
+  两条候选被 `already_virtual` 一起吞掉。这是**夹具真值不跨版本**，不是产品缺陷——修法是把“未开 VT 的 4K
+  大图”显式钉住（`gen_assets_cmdlet._pin_virtual_off` 写后回读，证据落 `assets_summary.json`），5.3/5.4 各 59/59。
+  产品侧同条读数留给用户：5.3 工程里大图 `already_virtual` 多半是引擎替美术开的。
 - 夹具自污染提醒：跑过 L2 的工程，编辑器日志会留下 10 条 `M_CalibTranslucent` 的
   `Invalid material ... Nanite` 警告，之后按名归因会命中它们——真实抽检请按资产路径核对或换日志窗口。
 
@@ -108,7 +120,12 @@
 - [x] 新规则 `drawcall_batching`（warn）：把机会清单纳入 `get_perf_report` ROI。
 ### 3b 执行（按 D2，风险最高）
 - [x] 路线 B（优先）：只生成合并方案/脚本 + 镜像关卡副本，不就地删 Actor。
-- [ ] **未做** 路线 A：`opt_level_merge_hism(map, source_filter, dry_run, confirm)` 用 `HierarchicalInstancedStaticMeshComponent` 折叠同 mesh+同材质的 StaticMeshActor（搬 per-instance transform，保留材质/光照）。API 漂移：`EditorLevelLibrary`→5.3 `LevelEditorSubsystem`。
+- [x] 路线 A：`opt_collapse_hism(mode=plan|collapse|restore, manifest, min_count, allow_blockers, ...)`
+  （实际命名，非原计划的 `opt_level_merge_hism`）——同网格散装 `StaticMeshActor` 折叠进
+  `HierarchicalInstancedStaticMeshComponent`，per-instance transform 原样搬入实例，销毁源 Actor。
+  5.4.4 真机钉死的口径：裸 Actor + `new_object` 建的 HISM 根组件（`EditorLevelLibrary` /
+  `LevelEditorSubsystem` 放置器路线在 5.4 写不满实例）；实例计数只信 `get_instance_count`，
+  写不满或变换读不到 → 整组诚实退回、不销毁源 Actor；材质覆盖/混入蓝图放置器默认整组拒收。
 - [x] 安全网：默认出 plan（列将被删源 Actor + 将生成的 HISM）；执行双钥；强提示「先提交 VCS/另存关卡副本，UE 无事务级回滚」。
 
 ## 测试随功能走（强制）
@@ -132,15 +149,15 @@
   `fix_broken_references` dry-run 把它们全路由进 `unfixable_missing`（无重定向桩可自动修）。
   手感：`sample_size=80` 在万级资产工程会系统性欠采样（`high_bpp` 全靠大资产度量面命中）。
 - 合并前：L0 全绿；触碰 unreal 真机路径的写入 → 至少一个引擎版本 L2 全 PASS。
-  **当前状态：L0 345 全绿；L2 5.4.4 50/50 全 PASS（真机路径达标）；仍欠 5.3.2 补跑 v1.5 新增 28 项
-  → 可合并，发版仍需用户明确授权。**
+  **当前状态：L0 394 用例全绿（393 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
+  真折叠↔回滚往返）→ 跨版本矩阵两列达标；仍欠 5.5/5.8/5.1（本机无引擎）。可合并，发版仍需用户明确授权。**
 
 ## 里程碑
 - [x] PR-1（只读，低风险）：`scan_texture_streaming` + 3 纹理规则 + `scan_nanite_candidates`/`nanite_translucent_conflict` + `analyze_instancing`/`drawcall_batching`；产出进 `get_perf_report`。附 L0 用例 + L2 夹具靶。
 - [x] PR-2：VT / MaxTextureSize / 压缩 批量写（双钥，含 Cube 与不支持格式跳过）。
 - [x] PR-3：Nanite 写（`opt_mesh_set_nanite` + `fix_nanite_translucent`，主攻跨版本 API）。
-- [~] PR-4：HISM 合批——**只读部分完成**（`analyze_instancing` + `drawcall_batching` 规则 +
-  路线 B 方案落盘）。路线 A 真折叠未做（见 D2），需单独拍板。
+- [x] PR-4：HISM 合批——只读（`analyze_instancing` + `drawcall_batching` 规则 + 路线 B 方案落盘）与
+  执行（路线 A `opt_collapse_hism` 真折叠 + 回滚清单 + `--hism-roundtrip` 真机往返）均已完成。
 
 ## 发布纪律
 - 攒够增量后**停下来问**；只有用户当前对话明确授权「发布 vX.Y.Z」才打 tag / 推 tag / 传 PyPI / 建 Release。版本仅在获授权真正发版时才 bump（`pyproject.toml` + `prism/__init__.py`）。

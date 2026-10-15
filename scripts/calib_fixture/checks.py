@@ -261,7 +261,8 @@ def _opt_texture_checks(r):
             big in pkgs("need_clamp") and big_row.get("clamp_to") == 2048
             and float(big_row.get("clamp_savings_mb") or 0) > 10.0,
             {"row": {k: big_row.get(k) for k in ("source_width", "max_size", "pool_mb",
-                                                 "clamp_to", "clamp_savings_mb")},
+                                                 "virtual_texture", "clamp_to",
+                                                 "clamp_savings_mb")},
              "elapsed_s": dt})
     r.check("streaming.clamped_texture_not_reflagged",
             fb not in pkgs("need_clamp")

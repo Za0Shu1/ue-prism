@@ -37,6 +37,28 @@ def _import_png(png, name):
     return EAL.does_asset_exist(FOLDER + "/" + name)
 
 
+def _pin_virtual_off(tex):
+    """显式关掉贴图的 VT 并回读确认。
+
+    为什么必须钉：UE 5.3 的贴图导入器按 UTextureImportSettings.AutoVTSize
+    (源像素数 >= 4096x4096 就 auto VT) 把大贴图置为 VirtualTextureStreaming=true，
+    5.4 起该行为取消 -> 不显式关，5.3 上"该开 VT 的 4K 大图"这块真值会被引擎
+    预开成 already_virtual，钳尺寸/VT 两条候选全部消失（跨版本矩阵假红）。
+    """
+    tried = []
+    try:
+        tex.set_editor_property("virtual_texture_streaming", False)
+        tried.append("virtual_texture_streaming:set")
+    except Exception as exc:
+        tried.append("virtual_texture_streaming:" + type(exc).__name__)
+    try:
+        off = not bool(tex.get_editor_property("virtual_texture_streaming"))
+    except Exception as exc:
+        tried.append("readback:" + type(exc).__name__)
+        off = False
+    return {"off": off, "tried": tried}
+
+
 def _ensure_texture(dest_name, png=None):
     """5.3 Interchange 会忽略 destination_name(源文件名决定包名)，故对需要改名的
     基准贴图统一走 duplicate_asset(显式目标名，跨版本稳)。优先复制已导入的 T_Used1K；
@@ -100,8 +122,10 @@ def main():
             raise RuntimeError("duplicate T_BigNoise failed")
         tex = unreal.load_asset(dest)
         tex.set_editor_property("max_texture_size", 128)
+        vt = _pin_virtual_off(tex)
         EAL.save_asset(dest)
-        return "T_FakeBig max_texture_size=128"
+        return {"max_texture_size": 128, "virtual_off": vt,
+                "truth": "T_FakeBig = 54MB 源盘/钳到 128 -> disk_only_bloat"}
 
     step("fake_big", fake_big)
 
@@ -210,16 +234,19 @@ def main():
 
 
     def calib_unclamped():
-        """流送池真值靶(不钳大图)：T_BigNoise 显式 max_texture_size=0(不限)。
-        已知真值：source_width=4096 且无 MaxSize -> scan_texture_streaming 必给
-        clamp_to=2048；与之对照 T_FakeBig(钳到 128)不得出现在 need_clamp。"""
+        """流送池真值靶(不钳大图)：T_BigNoise 显式 max_texture_size=0(不限) + 关 VT。
+        已知真值：source_width=4096、无 MaxSize、非虚拟 -> scan_texture_streaming 必给
+        clamp_to=2048 且进 need_clamp；opt_texture_set_virtual 必须把它 planned 而不是
+        当成 already_virtual 跳过。与之对照 T_FakeBig(钳到 128)不得出现在 need_clamp。"""
         pkg = FOLDER + "/T_BigNoise"
         tex = unreal.load_asset(pkg)
         if tex is None:
             raise RuntimeError("load T_BigNoise failed")
         tex.set_editor_property("max_texture_size", 0)
+        vt = _pin_virtual_off(tex)
         EAL.save_asset(pkg)
-        return "T_BigNoise max_texture_size=0 (unclamped 4K clamp target)"
+        return {"max_texture_size": 0, "virtual_off": vt,
+                "truth": "T_BigNoise = 未钳未虚拟 4K -> clamp_to=2048 / VT 可开"}
 
     step("calib_unclamped", calib_unclamped)
 
