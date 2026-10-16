@@ -257,6 +257,34 @@ C 落地成只读工具后，真机判据自建自清理，**不并进 59 项门
 13 张纹理里 11 张有记录、5 张直连靶两态可复现，`missing_bytes` 随翻转在 0 与 133.7MB
 之间移动，翻页窗口 `cap/scanned/truncated/total_available` 一致。
 
+## LOD 族立项前取证（`probe_mesh_lod_api.py`，2026-10-16）
+
+LOD 的**读**面早被 `get_asset_metrics` 真机钉过（`get_num_lods` + 每级 triangles/sections），
+但**阈值能不能改**没量过——这决定 LOD 族是做成了写操作，还是只能做只读诊断。故先跑探针：
+无头 commandlet 即可（夹具 `CalibMesh` 就是 commandlet 里 `duplicate_asset(/Engine/BasicShapes/Cube)`
+造的，StaticMesh 副本不像 TextureCube 副本那样会崩）：
+
+    UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=scripts/calib_fixture/probe_mesh_lod_api.py -stdout -unattended -nosplash
+
+5.3.2 与 5.4.4 两轮结论**逐条一致**（`class_members` 差集为空），探针默认造完即删（删前释放引用
++ `gc.collect()`，5.4 实证仍持引用时 `delete_asset` 会空指针崩编辑器）：
+
+- **ScreenSize 属性面不可达**：`lod_screen_sizes/screen_sizes/lod_screen_size/lod0_screen_size/
+  screen_size_list/lod_info` 六候选全 `Failed to find property`，写面同样全 miss——每级阈值在
+  `FStaticMeshRenderData`（非 UPROPERTY），Python 看不见。**LOD 阈值改不了，这条死路已钉死**。
+- **`is_lod_screen_size_auto_computed()` 可读**（noarg 形态，两版均 True）：这是诚实判据的根，
+  引擎自动算阈值时，"美术阈值不合理"这类结论不成立，工具必须回传该标志而不是猜。
+- **每平台 Min LOD 可读写**：`get_minimum_lod_for_platform("ALL")` 基线 -1（无覆盖），
+  `set_minimum_lod_for_platform(key, 3)` 后回读相符（ALL/Windows/WindowsNoEditor 三键均验）。
+  `get_minimum_lod_for_platforms()`/`get_min_lod_for_quality_levels()` 回传的是 TMap
+  （形态 `(Map, 0)`，out-param 风格），画质等级面的 `set_min_lod_for_quality_levels` 传 list 会
+  `Failed to convert parameter` —— 需构造 `unreal.Map`，第一版不做该面，如实记为待办。
+- **`unreal` 顶层 LOD 类面** 5.4 56 项 vs 5.3 54 项，差集只有 4 个 HLOD/Landscape 相关类
+  （HLOD 族要立项时再钻）。`StaticMeshEditorSubsystem`/`StaticMeshEditorLibrary`/
+  `AssetToolkitEditorSubsystem` 三个正门在两版 Python 上**都不存在**，候选链只能挂在资产身上。
+- 探针产物 `probe_mesh_lod_api.json` 的 `verdict` 就是立项判据三档：`write_ok`/`read_only`/
+  `nothing`。本轮 = `write_ok`（via `platform:ALL`）-> LOD 族按「只读扫描 + 每平台 Min LOD 写」立项。
+
 ## L2/L3 cook·package 全链路（`scripts/verify_cook_chain.py`）
 
 cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编辑器桥**，且要求编辑器关闭（避免与 headless cook 争用工程锁）。故它不进 `run_fixture`（后者会重开编辑器），单独成脚本、单独跑。机器绝对路径只在脚本 stdout 回显，不入库。

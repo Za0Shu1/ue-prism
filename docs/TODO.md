@@ -207,6 +207,14 @@
     复制一份数学、要么新开共享模块，而真实工程 0/16 在场意味着这条路径几乎不落地，不值。
     读数口径提醒不变：冷热态敏感的结论先看 `runtime_basis`
     与 `size_basis`。
+- **#13 LOD 族可达面已钉（2026-10-16 探针）**：见 docs/TESTING.md「LOD 族立项前取证」。
+  一句话：每级 `ScreenSize` 在 UE Python 上**读不到也写不到**（5.3/5.4 一致，六候选属性面全 miss），
+  所以 LOD 族不做"改阈值"；能做的是**每平台 Min LOD 强制降级**（`set_minimum_lod_for_platform`
+  实测可写、回读相符）+ **只读阶梯诊断**（LOD 数、每级三角数、`is_lod_screen_size_auto_computed`、
+  Nanite 状态、平台覆盖）。画质等级那面要构造 `unreal.Map`，第一版留空并在 note 里说清。
+  立项形态：`scan_mesh_lod`（只读）→ `opt_mesh_set_min_lod`（写·双钥，落原值可回滚）。
+  收益口径是**三角数削减潜力**（帧时间侧），不是 MB——与纹理池那本账分开放，别相加。
+
 - **#12 5.3 导入器把 4K 大图自动开成 VT**（2026-10-15 补跑 5.3 时红两条：
   `streaming.clamp_target_planned` / `streaming.vt_write_blocks_cube`）：5.3 的 `UTextureImportSettings.AutoVTSize`
   让源像素 ≥ 4096×4096 的贴图一进工程就 `VirtualTextureStreaming=true`（5.4 起取消该行为），于是钳尺寸/VT
