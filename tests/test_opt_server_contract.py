@@ -52,7 +52,8 @@ def _ok(result):
 def test_new_tools_are_registered():
     names = {t.__name__ for t in server._TOOLS}
     assert set(NEW_TOOLS) <= names
-    assert len(server._TOOLS) == 30
+    assert "scan_missing_source_files" in names
+    assert len(server._TOOLS) == 31
 
 
 # ---------- 只读工具转发 ----------
@@ -87,6 +88,18 @@ def test_scan_nanite_candidates_forwards_thresholds(monkeypatch):
     _fn, args = h["c"].calls[0]
     assert args["min_triangles"] == 123456 and args["max_assets"] == 9
     assert args["top"] == 2 and args["offset"] == 3
+
+
+def test_scan_missing_source_files_forwards_limits(monkeypatch):
+    """只读在场性诊断：参数原样下总线，超时给足（窗口内逐个 load_asset）。"""
+    h = _install(monkeypatch, _ok({"rows": [], "verdict_counts": {}}))
+    env = server.scan_missing_source_files(folder="Foo", class_contains="Texture",
+                                           limit=30, offset=60, max_items=7)
+    fn, args = h["c"].calls[0]
+    assert env["ok"] is True and fn == "scan_missing_source_files"
+    assert args == {"folder": "Foo", "class_contains": "Texture", "limit": 30,
+                    "offset": 60, "max_items": 7}
+    assert h["c"].timeout >= 240
 
 
 # ---------- 写工具的双钥转发 ----------

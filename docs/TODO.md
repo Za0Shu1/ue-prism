@@ -15,7 +15,7 @@
 > 2 的幂判定可无旁证区分）；C 定价修复放弃（16/16 张 import 记录都有原文件路径，
 > 但 0/16 在场）。**D 双假设求解器已落地**（POOL_MODEL `v4-cube-dual-hypothesis`，
 > 全景类 3 倍低估归位）；剩两项已拍板：**A″ 不做**（加宽阀门抓不到成批伪精确却误伤高位深），
-> **C 立项**为只读缺源诊断（零金额，不再承担定价职责）。代号含义见下「代号与术语」。
+> **C 已实现**为只读缺源诊断 `scan_missing_source_files`（零金额，不再承担定价职责）。代号含义见下「代号与术语」。
 > 触发来源：对 UE 5.3 工程 ProjectA 的实测分析（详见会话），暴露三类可产品化的优化点。
 
 ## 代号与术语（本文自造，先对表再读下文）
@@ -29,7 +29,7 @@
   - **B1** = 自写 DDS 已知真值靶 + 冷态反推探针，把 B 的歧义面量化。**已入库**。
   - **B2** = 在真实工程只读复测立方图的面数语义。**已定案：双语义**。
   - **C** = 读 `asset_import_data` 记录的原始文件头拿真宽高。**定价职责已放弃**，
-    剩余价值改立为只读缺源诊断。
+    剩余价值改立为只读缺源诊断 -> 已落地成 `scan_missing_source_files`（只读、零金额）。
   - **D** = 立方图源边长的双假设求解器（阵列 6xS^2 优先，无 2 的幂解再试 2:1 全景
     2xS^2）。**已落地**，POOL_MODEL `v4-cube-dual-hypothesis`。
 
@@ -62,7 +62,8 @@
   无从谈起，钳尺寸仍有效；改回 `TC_Default` 的收益是变可流送，别按省 3/4 池报价。
 - server 新增 9 个工具（`scan_texture_streaming`、`opt_texture_set_virtual`、
   `opt_texture_clamp_max_size`、`opt_texture_set_compression`、`scan_nanite_candidates`、
-  `opt_mesh_set_nanite`、`fix_nanite_translucent`、`analyze_instancing`、`opt_collapse_hism`），共 30 个。
+  `opt_mesh_set_nanite`、`fix_nanite_translucent`、`analyze_instancing`、`opt_collapse_hism`），共 30 个；
+  #11 C 再补第 31 个 `scan_missing_source_files`（只读缺源诊断，零金额）。
 - 规则 `get_perf_report` 7→12 条：+`texture_streaming_overflow`（含 ini 池对照）、
   `oversized_mip`、`uncompressed_texture`、`nanite_translucent_conflict`（离线直读编辑器日志）、
   `drawcall_batching`；三档 PROFILES 各配阈值（mobile 更敏感）。
@@ -193,10 +194,17 @@
     证实的系统性错报，A″ 不加严，残余伪精确如实公示。
   - **C 已定案：立项为只读运维诊断（2026-10-16）**。「读原文件头定价」已放弃（16/16 有
     路径、0/16 在场）；留下的不是金额而是**可维护性**——源文件丢了的贴图改尺寸/改压缩/
-    重导入都无从下手，只能在引擎侧钳 MaxSize。新工具暂定 `scan_missing_source_files`：
-    枚举 /Game 纹理，取 `asset_import_data` 记录路径判在不在，输出缺失清单 + 按目录聚合；
+    重导入都无从下手，只能在引擎侧钳 MaxSize。新工具 `scan_missing_source_files`（2026-10-16 已落地）：
+    枚举 /Game 资产，取 `asset_import_data` 记录路径判在不在，输出缺失清单 + 按目录聚合；
     在场的那部分仍用 `parse_hdr`/`parse_dds` 读头与 `src_mem` 互验。只读、零金额、不涉双钥；
-    随工具补 L0 无引擎降级用例与夹具靶（import 记录指向不存在路径的贴图）。
+    随工具已补 L0 16 用例（降级结构键 + `_import_record` 四签名兜底 + 聚合截断）与真机探针
+    `probe_missing_source_files.py`（夹具源图目录改名制造 missing、改回验 present，
+    5.3.2/5.4.4 各 12/12 PASS；不进 59 项门禁，理由见 docs/TESTING.md）。
+    落地取舍三条：① 写进 `domain/assets.py` 而非新模块（`pluginpack.ENGINE_MODULES` 是显式
+    清单，新模块要连带改清单与安装文件数，收益不抵风险）；② 需要 `load_asset`（载入编辑器内存
+    是副作用，故 limit 兼作载入上限，默认 200）；③ 在场源文件的读头互验**不进 domain**——
+    `parse_hdr/parse_dds` 留在 `scripts/calib_fixture/source_scan.py`，把它搬进 domain 要么
+    复制一份数学、要么新开共享模块，而真实工程 0/16 在场意味着这条路径几乎不落地，不值。
     读数口径提醒不变：冷热态敏感的结论先看 `runtime_basis`
     与 `size_basis`。
 - **#12 5.3 导入器把 4K 大图自动开成 VT**（2026-10-15 补跑 5.3 时红两条：
@@ -269,8 +277,9 @@
   `fix_broken_references` dry-run 把它们全路由进 `unfixable_missing`（无重定向桩可自动修）。
   手感：`sample_size=80` 在万级资产工程会系统性欠采样（`high_bpp` 全靠大资产度量面命中）。
 - 合并前：L0 全绿；触碰 unreal 真机路径的写入 → 至少一个引擎版本 L2 全 PASS。
-  **当前状态：L0 444 用例全绿（443 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
-  真折叠↔回滚往返，以及 #11 D（POOL_MODEL v4）落地后的同日复跑）→ 跨版本矩阵两列达标；仍欠 5.5/5.8/5.1（本机无引擎）。
+  **当前状态：L0 461 用例全绿（460 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
+  真折叠↔回滚往返，以及 #11 D（POOL_MODEL v4）落地后的同日复跑），#11 C 独立探针两版各 12/12 PASS
+  → 跨版本矩阵两列达标；仍欠 5.5/5.8/5.1（本机无引擎）。
   可合并，发版仍需用户明确授权。**
 
 ## 里程碑
@@ -279,6 +288,8 @@
 - [x] PR-3：Nanite 写（`opt_mesh_set_nanite` + `fix_nanite_translucent`，主攻跨版本 API）。
 - [x] PR-4：HISM 合批——只读（`analyze_instancing` + `drawcall_batching` 规则 + 路线 B 方案落盘）与
   执行（路线 A `opt_collapse_hism` 真折叠 + 回滚清单 + `--hism-roundtrip` 真机往返）均已完成。
+- [x] #11 C：`scan_missing_source_files`（只读缺源诊断，五档 verdict + 目录聚合）；L0 16 用例 +
+  真机探针 5.3.2/5.4.4 各 12/12；A″ 已定案不做，#11 至此四项（A/B/B2/C/D）全部收口。
 
 ## 发布纪律
 - 攒够增量后**停下来问**；只有用户当前对话明确授权「发布 vX.Y.Z」才打 tag / 推 tag / 传 PyPI / 建 Release。版本仅在获授权真正发版时才 bump（`pyproject.toml` + `prism/__init__.py`）。

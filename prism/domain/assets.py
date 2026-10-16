@@ -1243,3 +1243,353 @@ def scan_broken_references(asset_paths=None, folder="/Game", limit=200, offset=0
     result["fixable_redirector_deps"] = sorted({r["dep"] for r in broken_rows if r["kind"] == "redirector"})
     result["api"] = {"get_dependencies": (sorted(sigs) if sigs else None)}
     return result
+
+
+# ---------------- 源文件在场性诊断（只读 · 零金额 · #11 C） ----------------
+
+_IMPORT_RECORD_METHODS = ("extract_filenames", "script_extract_filenames",
+                          "get_first_filename", "script_get_first_filename")
+_IMPORT_RECORD_PROPS = ("filenames", "file_names", "source_files")
+
+
+def _clip(value, n=120):
+    """异常/长文本进返回面前先压平，避免把整段栈或超长路径灌进信封。"""
+    s = str(value)
+    if len(s) > n:
+        s = s[:n] + "..."
+    return s.replace("\r", " ").replace("\n", " ")
+
+
+def _src_scan_skip(class_name, package):
+    """在场性扫描的排除项：这些类没有「外部原文件」概念，且载入编辑器内存有副作用。
+
+    返回跳过原因或 None。关卡(World)与 World Partition 的外部 Actor/外部对象由关卡流水线
+    生成，源=关卡本身；重定向桩是待清理项，不是源丢失。
+    """
+    if class_name == "World":
+        return "level"
+    if "__ExternalActors__" in package or "__ExternalObjects__" in package:
+        return "external_wp"
+    if class_name in ("Redirector", "ObjectRedirector"):
+        return "redirector"
+    return None
+
+
+def _project_dir_nc(unreal):
+    """工程根的归一化绝对路径（判记录路径是否落在本工程内）；取不到返回 None。"""
+    try:
+        root = unreal.Paths.project_dir()
+    except Exception:
+        return None
+    try:
+        return os.path.normcase(os.path.abspath(root))
+    except Exception:
+        return None
+
+
+def _is_under(path, root_nc):
+    """记录路径是否落在本工程内（判『美术把源图留在工程里』还是『散在桌面/外置盘』）。
+
+    两侧都过 normcase+abspath，否则 C:/proj 与 C:\\proj 混排会整体误判成工程外。
+    取不到工程根返回 False（不猜）。
+    """
+    if not root_nc:
+        return False
+    try:
+        p = os.path.normcase(os.path.abspath(path))
+        base = os.path.normcase(os.path.abspath(root_nc))
+    except Exception:
+        return False
+    if p == base:
+        return True
+    return p.startswith(base.rstrip("/\\" + os.sep) + os.sep)
+
+
+def _clean_paths(raw):
+    """把引擎回传的记录面洗成干净路径列表：单 str 包成 list，None/空白项剔除。
+
+    `str(None)` 是 "None"，不洗掉就会被当成一条真实路径记进 missing——宁缺勿假。
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    out = []
+    for x in (raw or []):
+        s = _clip(x, 1024).strip()
+        if s and s.lower() != "none":
+            out.append(s)
+    return out
+
+
+def _import_record(obj):
+    """读导入记录里的原始文件绝对路径：两条导入管线都要接住。
+
+    Interchange(5.3+ 默认) -> InterchangeAssetImportData.extract_filenames()；
+    旧管线 -> AssetImportData 子类的 get_first_filename() / filenames 属性。
+    返回 (files, via, note)：files 为空则 via=None；本函数绝不抛（调用方按 no_record 记账）。
+    via 原样回传，跨版本兼容矩阵靠它看哪条签名真的命中。
+    """
+    errs = []
+    si = None
+    for prop in ("asset_import_data", "import_data"):
+        try:
+            cand = obj.get_editor_property(prop)
+        except Exception:
+            continue
+        if cand is not None:
+            si = cand
+            break
+    if si is None:
+        return [], None, "no_import_data"
+    for meth in _IMPORT_RECORD_METHODS:
+        fn = getattr(si, meth, None)
+        if not callable(fn):
+            continue
+        try:
+            raw = fn()
+        except Exception as exc:
+            errs.append("%s:%s" % (meth, _clip(exc, 60)))
+            continue
+        files = _clean_paths(raw)
+        if files:
+            return files, meth, ("|".join(errs) if errs else None)
+    for prop in _IMPORT_RECORD_PROPS:
+        try:
+            raw = si.get_editor_property(prop)
+        except Exception:
+            continue
+        files = _clean_paths(raw)
+        if files:
+            return files, "prop:" + prop, ("|".join(errs) if errs else None)
+    note = "empty_record"
+    if errs:
+        note = note + "|" + "|".join(errs)
+    return [], None, _clip(note, 200)
+
+
+def _src_verdict(recorded):
+    """按记录路径的在场情况定档；空记录 -> no_record（不等于源丢失）。"""
+    if not recorded:
+        return "no_record"
+    hits = 0
+    for r in recorded:
+        if r["exists"]:
+            hits += 1
+    if hits == len(recorded):
+        return "present"
+    if hits == 0:
+        return "missing"
+    return "partial"
+
+
+def _source_rollup(rows, by_dir_cap=30, max_items=200):
+    """把扫描行汇成五档计数、受影响体量与目录聚合，并按『缺料优先』定行序。
+
+    纯 stdlib（不碰 unreal），L0 直接钉聚合与截断口径。missing_bytes 只计 verdict=missing 的
+    uasset 磁盘体量（可维护性口径，不是显存/池金额）；partial 单独计数，两本账不合并。
+    """
+    verdict_counts = {}
+    by_dir = {}
+    for r in rows:
+        v = r.get("verdict")
+        verdict_counts[v] = verdict_counts.get(v, 0) + 1
+        size = int(r.get("uasset_bytes") or 0)
+        parent = r["package"].rpartition("/")[0] or "/"
+        slot = by_dir.setdefault(parent, {"count": 0, "missing": 0, "partial": 0,
+                                          "bytes": 0, "missing_bytes": 0})
+        slot["count"] += 1
+        slot["bytes"] += size
+        if v == "missing":
+            slot["missing"] += 1
+            slot["missing_bytes"] += size
+        elif v == "partial":
+            slot["partial"] += 1
+
+    present = verdict_counts.get("present", 0)
+    partial = verdict_counts.get("partial", 0)
+    missing = verdict_counts.get("missing", 0)
+    missing_bytes = sum(int(r["uasset_bytes"] or 0) for r in rows if r["verdict"] == "missing")
+
+    dirs_sorted = sorted(by_dir.items(),
+                         key=lambda kv: (-kv[1]["missing_bytes"], -kv[1]["count"], kv[0]))
+    out = {
+        "present_count": present,
+        "partial_count": partial,
+        "missing_count": missing,
+        "no_record": verdict_counts.get("no_record", 0),
+        "load_failed_count": verdict_counts.get("load_failed", 0),
+        "with_record": present + partial + missing,
+        "missing_bytes": missing_bytes,
+        "missing_mb": round(missing_bytes / 1048576.0, 3),
+        "by_dir": {k: {"count": v["count"], "missing": v["missing"],
+                       "partial": v["partial"], "bytes": v["bytes"],
+                       "missing_bytes": v["missing_bytes"],
+                       "missing_mb": round(v["missing_bytes"] / 1048576.0, 3)}
+                   for k, v in dirs_sorted[:by_dir_cap]},
+        "by_dir_truncated": len(dirs_sorted) > by_dir_cap,
+    }
+    order = {"missing": 0, "partial": 1, "load_failed": 2, "no_record": 3, "present": 4}
+    rows = sorted(rows, key=lambda r: (order.get(r["verdict"], 5),
+                                       -int(r["uasset_bytes"] or 0), r["package"]))
+    if max_items and max_items > 0:
+        out["rows"] = rows[:max_items]
+        out["rows_truncated"] = len(rows) > max_items
+    else:
+        out["rows"] = rows
+        out["rows_truncated"] = False
+    return out
+
+
+@register
+def scan_missing_source_files(folder="/Game", class_contains="", limit=200,
+                              offset=0, max_items=200):
+    """诊断『导入原文件已不在记录路径上』的资产（只读）：这类资产改尺寸/改压缩/重导入都无从下手。
+
+    UE 导入时把外部原文件的绝对路径定格在 asset_import_data 里。本工具枚举 folder 下资产，
+    读该记录并逐个判本机是否还在场，输出缺失清单 + 按资产目录聚合：
+      present     记录的文件全在场（还能重导入；可继续读源文件头与运行时估算互验）
+      partial     部分在场（多文件源缺料，重导入会失败或不完整）
+      missing     全不在场（源已丢，只能在引擎侧钳 MaxSize/改 LOD —— 本工具的主目标）
+      no_record   没有导入记录（编辑器内创作、代码生成、或旧管线未记录；**不等于源丢失**）
+      load_failed 资产载入失败（损坏/依赖缺失），计入 load_failed_count
+    verdict 之外的 missing_bytes/missing_mb 只是**受影响资产的 uasset 磁盘体量**（可维护性口径），
+    不是省显存/省池的金额——源文件本来就不进 cook 产物，删它一分钱收益都没有。
+
+    诚实边界（务必读）：
+    - 记录路径是**导入那一刻的定格**，可能属于别人的机器、别的盘符或已拔掉的外置盘；
+      「missing」= 本机找不到源，不代表美术没留档（可能换机器、归档网盘）。据此删资产是错的。
+    - 本工具只读，但 `unreal.load_asset` 会把窗口内的资产**载入编辑器内存**（与 get_asset_metrics
+      同类副作用），limit 控窗口大小；大工程先按 class_contains 缩面再翻页。
+    - 排除项见 skipped 计数（关卡/外部 Actor/重定向桩），它们没有外部源概念，不计入清单。
+
+    folder 为 Content 下目录前缀（/Game 前缀可省）；class_contains 按类名子串过滤（如 Texture）；
+    行按 uasset 体量降序取 offset/limit 窗口，rows 再截到 max_items。列表带 total/truncated/cap。
+    无引擎（总线降级）结构键常驻、返回空。
+    """
+    folder = (folder or "/Game").strip().strip('"')
+    if not folder.startswith("/Game"):
+        folder = "/Game/" + folder.lstrip("/")
+    class_contains = (class_contains or "").strip().lower()
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 200
+    try:
+        offset = max(0, int(offset))
+    except Exception:
+        offset = 0
+    try:
+        max_items = max(1, int(max_items))
+    except Exception:
+        max_items = 200
+
+    result = {
+        "folder": folder, "class_contains": class_contains or None,
+        "found_registry": False,
+        "total_available": 0, "scanned": 0, "offset": offset, "cap": limit,
+        "truncated": False,
+        "rows": [], "rows_truncated": False,
+        "with_record": 0, "no_record": 0,
+        "present_count": 0, "partial_count": 0, "missing_count": 0,
+        "load_failed_count": 0,
+        "missing_bytes": 0, "missing_mb": 0.0,
+        "skipped": {}, "skipped_count": 0,
+        "by_dir": {}, "by_dir_truncated": False,
+        "api": {"import_record_via": {}},
+        "note": ("verdict 口径：present/partial/missing 按 asset_import_data 记录路径的本机在场性；"
+                 "no_record=编辑器内创作或旧管线未记录（不等于源丢失）。记录路径是导入时定格，"
+                 "可能属他人机器/别盘符，missing 不可据此删资产。missing_mb 是受影响 uasset 体量，"
+                 "不是显存/池金额。"),
+    }
+    try:
+        import unreal
+    except Exception:
+        result["note"] = "no_engine: 需编辑器在线(桥)才能读导入记录并判原文件在场性。"
+        return result
+    ar = _registry()
+    if ar is None:
+        return envelope.make_err(envelope.Code.UE_API_MISMATCH,
+                                 "AssetRegistry unavailable: get_asset_registry failed on this engine build")
+    result["found_registry"] = True
+    datas = _assets_under(ar, unreal, folder)
+    if datas is None:
+        return envelope.make_err(envelope.Code.UE_API_MISMATCH,
+                                 "get_assets_by_path: no candidate signature matched (5.0-5.8 drift?)")
+
+    root_nc = _project_dir_nc(unreal)
+    skipped = {}
+    entries = []
+    for pkg, d in _dedupe_by_package(datas, unreal):
+        cls = _class_name(unreal, d) or ""
+        if class_contains and class_contains not in cls.lower():
+            continue
+        ex = _src_scan_skip(cls, pkg)
+        if ex:
+            skipped[ex] = skipped.get(ex, 0) + 1
+            continue
+        _fp, size = _disk_size(unreal, pkg)
+        entries.append((pkg, cls, int(size) if size else 0))
+    result["skipped"] = skipped
+    result["skipped_count"] = sum(skipped.values())
+    entries.sort(key=lambda t: (-t[2], t[0]))
+
+    total_all = len(entries)
+    result["total_available"] = total_all
+    window = entries[offset:offset + limit]
+    result["scanned"] = len(window)
+    result["truncated"] = (offset + limit) < total_all
+
+    rows = []
+    via_counts = {}
+    load_failed_examples = []
+    for pkg, cls, size in window:
+        row = {"package": pkg, "class": cls, "uasset_bytes": size,
+               "uasset_mb": round(size / 1048576.0, 3),
+               "verdict": None, "via": None, "recorded": []}
+        obj = None
+        try:
+            obj = unreal.load_asset(pkg)
+        except Exception as exc:
+            obj = None
+            if len(load_failed_examples) < 10:
+                load_failed_examples.append("%s: %s" % (pkg, _clip(exc, 90)))
+        if obj is None:
+            row["verdict"] = "load_failed"
+        else:
+            files, via, rec_note = _import_record(obj)
+            rec = []
+            for f in files:
+                try:
+                    exists = bool(os.path.isfile(f))
+                except Exception:
+                    exists = False
+                rec.append({"path": f.replace("\\", "/"), "exists": exists,
+                            "under_project": _is_under(f, root_nc),
+                            "ext": os.path.splitext(f)[1].lower()})
+            row["recorded"] = rec
+            row["via"] = via
+            row["verdict"] = _src_verdict(rec)
+            if rec_note:
+                row["record_note"] = rec_note
+            if via:
+                via_counts[via] = via_counts.get(via, 0) + 1
+            obj = None
+        rows.append(row)
+
+    result["api"]["import_record_via"] = via_counts
+    for key, value in _source_rollup(rows, by_dir_cap=30, max_items=max_items).items():
+        result[key] = value
+
+    if result["no_record"] and result["with_record"] == 0 and result["load_failed_count"] == 0:
+        result["note"] = result["note"] + (
+            " 本窗 %d 个资产全无导入记录——多半是编辑器内创作/旧管线未定格，"
+            "不等于源文件丢失，别按缺失处理。" % result["scanned"])
+    if load_failed_examples:
+        result["note"] = result["note"] + " 载入失败样例见 load_failed_examples。"
+        result["load_failed_examples"] = load_failed_examples[:10]
+    if result["truncated"]:
+        result["scan_note"] = ("本窗仅检查 offset=%d 起 %d 个资产(共 %d，按 uasset 体量降序)；"
+                              "计数与 by_dir 为该窗口内值，翻页可累计。"
+                              % (offset, result["scanned"], total_all))
+    return result

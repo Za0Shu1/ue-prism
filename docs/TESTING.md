@@ -116,8 +116,8 @@
 
 ## v1.5 优化族的真机验收（5.3 / 5.4 均已跑）
 
-L0 444 用例（443 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
-各 59/59 全 PASS**（2026-10-15，两具独立沙箱工程；#11 D 落地成 POOL_MODEL
+L0 461 用例（460 passed / 1 skipped）全绿；`run_fixture --hism-roundtrip` 在 **UE 5.3.2 与 UE 5.4.4
+各 59/59 全 PASS**（2026-10-15，两具独立沙箱工程；2026-10-16 在 domain 追加 `scan_missing_source_files` 并重装插件后复跑，两版仍各 59/59；#11 D 落地成 POOL_MODEL
 `v4-cube-dual-hypothesis` 后同日复跑，两版桥都回传 `source_layout=cube_array`）。5.3 这一行照出一处只在跨版本时才会露脸的
 真值坑，产品代码不用改，改的是夹具：
 
@@ -238,6 +238,25 @@ import 记录 + 原文件头解析；零写入零保存，取证 JSON 只落工�
 （缺 `streaming` 直接 ImportError）——复测脚本先卸载非仓库来源的 `prism*` 模块再 import；
 commandlet 里异常只进引擎日志不可读——兜底 `_fail()` 把 traceback 落盘到取证目录。
 
+## #11 C 缺源诊断的真机校验（`scan_missing_source_files` + `probe_missing_source_files.py`）
+
+C 落地成只读工具后，真机判据自建自清理，**不并进 59 项门禁**：门禁项会重读物化资产，
+把源图目录改名的那一刻掺进 59 项会让孤儿/引用/预算三组真值读数跟着漂移，得不偿失。
+改为独立探针，跑法（编辑器在线、工程侧已 `plugin-install` 当前仓库代码）：
+
+    python scripts/calib_fixture/probe_missing_source_files.py <bus_dir> <project_dir>
+
+已知真值就是夹具自己的导入源：`<proj>/Saved/PrismFixture/pngs` 改名 `pngs_off` -> 5 张
+直连导入靶（`T_BigNoise/T_Used1K/T_Orphan1..3`）的记录路径全部失效 => verdict 必须翻
+`missing`；改回 => 必须翻回 `present`；`finally` 里无条件复原。另有编辑器内 `create_asset`
+造的 `M_CalibRef` 必须是 `no_record`（无导入记录 != 源丢失），关卡必须进 `skipped.level`
+而不是被载入编辑器内存。
+
+**2026-10-16 实测：UE 5.3.2 与 UE 5.4.4 各 12/12 全 PASS**，两版命中同一条签名
+`extract_filenames`（`api.import_record_via` 就是跨版本兼容矩阵的观察窗），夹具目录
+13 张纹理里 11 张有记录、5 张直连靶两态可复现，`missing_bytes` 随翻转在 0 与 133.7MB
+之间移动，翻页窗口 `cap/scanned/truncated/total_available` 一致。
+
 ## L2/L3 cook·package 全链路（`scripts/verify_cook_chain.py`）
 
 cook 由 server 侧调 UAT（`RunUAT.bat BuildCookRun`）驱动，**不经过编辑器桥**，且要求编辑器关闭（避免与 headless cook 争用工程锁）。故它不进 `run_fixture`（后者会重开编辑器），单独成脚本、单独跑。机器绝对路径只在脚本 stdout 回显，不入库。
@@ -279,7 +298,7 @@ HISM 折叠↔回滚）与 `verify_cook_chain`（cook 9 项 / package 10 项）�
   **5.3.2 夹具 59/59（2026-10-15 补跑，v1.5 优化族与 HDR 台账已在 5.3 真机钉住）**。
   更多版本（5.5/5.8/5.1/5.0）须在别的机器补跑——本机注册表里的 5.1/5.5 是卸载残留，只剩 5.3/5.4 两套引擎。
 
-## 工具覆盖矩阵（当前 30 个 MCP 工具）
+## 工具覆盖矩阵（当前 31 个 MCP 工具）
 
 | 工具 | L0 离线用例 | L2 夹具 checks | 仍欠（L3 真实工程） |
 |---|---|---|---|
@@ -290,6 +309,7 @@ HISM 折叠↔回滚）与 `verify_cook_chain`（cook 9 项 / package 10 项）�
 | `fix_broken_references`（写·双钥） | test_migrate(+4 用例:双钥守卫/无引擎降级[读+写]/dry_run fixable-missing 路由) | refs.fix_plan_routing（真机路由 stub 靶进 missing） / refs.fix_write_honest（confirm 落盘 executed 不崩、诚实回报） | redirector 桩自动修复正样本（5.4 python 不留桩 → L3）；missing 需人工 VCS 还原/重指向 |
 | `get_asset_chain`（环/god/影响半径） | test_assets(+SCC 纯逻辑) / test_buscall | -（小图 smoke） | 真实大工程的大闭包耗时、god_min_refs 阈值手感 |
 | `scan_orphan_assets`（一包一条 + 单包引用查询失败降级） | test_orphan_degrade / test_scan_orphan_ref_failure（3 用例：单包失败不带走整场扫描、整窗全失败仍报 UE_API_MISMATCH、降级结构键常驻） | orphan.targets_found / map_not_orphaned | 真实工程假阳性抽检 >=20 条 |
+| `scan_missing_source_files`（缺源诊断：import 记录路径在场性五档判据） | test_source_files（16 用例：降级结构键常驻、folder/limit 归一、`_import_record` 四条签名+属性面兜底、脏值不得变成路径、`_src_verdict` 五态、`_src_scan_skip` 排除、`_is_under` 分隔符归一、`_source_rollup` 计数/聚合/截断） + test_opt_server_contract（参数转发与超时） | 独立探针 `probe_missing_source_files`：5.3.2/5.4.4 各 12/12 PASS（present<->missing 往返 + no_record + 关卡排除），不进 59 项门禁 | 客户工程 16/16 有记录、0/16 在场已由 `recheck_cube_semantics.py` 取证；他人机器/网盘路径的记录形态（本机判 missing 属正确行为） | 
 | 注册表枚举去重（`_dedupe_by_package` / `_export_object_path`：多导出包一包一条） | test_asset_enumeration_dedupe（7 用例：窗口挤占、类误标、`prefer_terms` 选代表导出、无 `object_path` 才回退 `package.leaf`、孤儿计数） | enumerate.scan_one_row_per_package / enumerate.opt_rows_unique_and_measurable | 5.0/5.1 无 `get_object_path` 的回退形状只有离线用例覆盖，待该版本真机复跑 |
 | `get_asset_metrics`（真大/假大+材质槽；立方图另回传 `source_layout`，#11 D） | test_metrics_degrade / test_metrics_runtime / test_source_probe_guard（探针缓存与开关） | metrics.cube_measurable / real_4k_is_runtime_heavy / capped_4k_is_disk_only_bloat / mesh_material_slots | 真实美术资产压缩格式下 est 口径偏差；碰撞面数 5.4 `UStaticMesh` python 无访问器（绑定限制，见资产表 CalibMesh 行）|
 | `list_level_actors`（compose） | test_actors_compose | compose.world_ge_1400 / cube_batching_opportunity | 真实 WP 关卡全载成本 |

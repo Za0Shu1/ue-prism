@@ -247,6 +247,23 @@ def scan_broken_references(asset_paths: Annotated[str, Field(description="只查
         {"asset_paths": paths, "folder": folder, "limit": int(limit), "offset": int(offset),
          "max_items": int(max_items), "include_engine": _as_bool(include_engine, default=False)})
 
+def scan_missing_source_files(folder: Annotated[str, Field(description="扫描范围，Content 下目录前缀（默认 /Game）")] = "/Game", class_contains: Annotated[str, Field(description="按类名子串过滤（不区分大小写），如 Texture；留空=全部资产")] = "", limit: Annotated[int, Field(description="本窗口最多检查多少个资产（每个都会 load_asset 进编辑器内存，代价高）")] = 200, offset: Annotated[int, Field(description="分页偏移（按 uasset 体量降序窗口）")] = 0, max_items: Annotated[int, Field(description="rows 明细输出上限")] = 200, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """诊断导入原文件已不在记录路径上的资产（只读）：这类资产改尺寸/改压缩/重导入都无从下手，只能引擎侧钳尺寸。Needs live bridge.
+
+    读 asset_import_data 定格的原始文件绝对路径并判本机在场性，输出 present/partial/missing/
+    no_record/load_failed 五档 + 按资产目录聚合。诚实边界：记录路径属导入那一刻（可能别人机器/
+    别盘符），missing 不等于美术没留档，**不可据此删资产**；missing_mb 是受影响 uasset 体量（可维护性口径），
+    不是显存/池金额。载入有编辑器内存副作用，先用 class_contains 缩面再翻页。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    return bus.BusClient(bus_dir, timeout=240).call(
+        "scan_missing_source_files",
+        {"folder": folder, "class_contains": class_contains, "limit": int(limit),
+         "offset": int(offset), "max_items": int(max_items)})
+
+
 # ---------------- 离线工具（读磁盘） ----------------
 
 def read_editor_log(level: Annotated[str, Field(description="Error|Warning|Display|All")] = "Error", tail: Annotated[int, Field(description="从日志末尾读取的行数")] = 2000, top: Annotated[int, Field(description="聚合分组上限")] = 30, project_dir: Annotated[str | None, Field(description="显式工程目录（与 project= 二选一）")] = None, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
@@ -882,6 +899,7 @@ _TOOLS = (
     scan_texture_streaming, opt_texture_set_virtual, opt_texture_clamp_max_size,
     opt_texture_set_compression, scan_nanite_candidates, opt_mesh_set_nanite,
     fix_nanite_translucent, analyze_instancing, opt_collapse_hism,
+    scan_missing_source_files,
 )
 
 
