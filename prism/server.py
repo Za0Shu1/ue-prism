@@ -887,6 +887,24 @@ def opt_collapse_hism(mode: Annotated[str, Field(description="plan=只出方案�
          "dry_run": dry_run, "confirm": confirm})
 
 
+def scan_mesh_lod(folder: Annotated[str, Field(description="Content 下目录前缀（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包取网格")] = None, paths: Annotated[str | None, Field(description="只查这些网格")] = None, min_triangles: Annotated[int, Field(description="LOD0 三角数低于此值不算候选（默认 20 万，同 rules.mesh_tri warn）")] = 200000, max_assets: Annotated[int, Field(description="本窗口最多度量多少个网格")] = 200, top: Annotated[int, Field(description="items 返回条数上限")] = 40, offset: Annotated[int, Field(description="分页偏移")] = 0, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """LOD 阶梯只读诊断（复盘 #13 · 1a）。Needs live bridge.
+
+    给每个 StaticMesh 的 LOD 数、每级三角数、LOD1/LOD0 降比、Nanite 状态、
+    `auto_computed`（阈值是否引擎自动算，探针实证每级 ScreenSize 在 UE Python
+    读不到也写不到）与每平台 Min LOD 覆盖，并汇出 `candidates.force_min_lod`
+    作为 opt_mesh_set_min_lod 的输入。收益是三角数（单实例单帧），不是 MB，
+    不能与纹理池那本账相加；Nanite 已开的网格不进降级候选。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    return bus.BusClient(bus_dir, timeout=240).call(
+        "scan_mesh_lod",
+        {"folder": folder, "map": map, "paths": paths, "min_triangles": int(min_triangles),
+         "max_assets": int(max_assets), "top": int(top), "offset": int(offset)})
+
+
 _TOOLS = (
 
     ping, list_level_actors, describe_asset, get_asset_references, get_asset_metrics,
@@ -900,6 +918,7 @@ _TOOLS = (
     opt_texture_set_compression, scan_nanite_candidates, opt_mesh_set_nanite,
     fix_nanite_translucent, analyze_instancing, opt_collapse_hism,
     scan_missing_source_files,
+    scan_mesh_lod,
 )
 
 

@@ -215,6 +215,14 @@
   立项形态：`scan_mesh_lod`（只读）→ `opt_mesh_set_min_lod`（写·双钥，落原值可回滚）。
   收益口径是**三角数削减潜力**（帧时间侧），不是 MB——与纹理池那本账分开放，别相加。
 
+  **状态（2026-10-16）**：1a `scan_mesh_lod` 已落地——`prism/domain/opt_lod.py`（进 `ENGINE_MODULES`，
+  插件落盘 21 文件）+ server 侧第 32 个工具 + L0 25 用例 + 真机独立探针 `probe_mesh_lod_scan`
+  （5.4.4 / 5.3.2 各 20/20 PASS，命中面两版逐条一致）。判据边界按探针定死：不给「改阈值」承诺、
+  `auto_computed` 只陈述事实、建议级落在实测窗口外就不借数字（`reduction_unmeasured`）。
+  1b `opt_mesh_set_min_lod`（写·双钥，落原值可回滚，Nanite 网格默认挡在闸门外）待做。
+  另欠一格：>1 级 LOD 的真机靶——5.3/5.4 的 Python 面造不出第二级 LOD（探针 7 个候选全 absent，
+  记 skipped 不记 FAIL），需 L3 真实工程里带 LOD 链的网格复测 `weak_lod_chain` / `min_lod_actionable`。
+
 - **#12 5.3 导入器把 4K 大图自动开成 VT**（2026-10-15 补跑 5.3 时红两条：
   `streaming.clamp_target_planned` / `streaming.vt_write_blocks_cube`）：5.3 的 `UTextureImportSettings.AutoVTSize`
   让源像素 ≥ 4096×4096 的贴图一进工程就 `VirtualTextureStreaming=true`（5.4 起取消该行为），于是钳尺寸/VT
@@ -285,8 +293,9 @@
   `fix_broken_references` dry-run 把它们全路由进 `unfixable_missing`（无重定向桩可自动修）。
   手感：`sample_size=80` 在万级资产工程会系统性欠采样（`high_bpp` 全靠大资产度量面命中）。
 - 合并前：L0 全绿；触碰 unreal 真机路径的写入 → 至少一个引擎版本 L2 全 PASS。
-  **当前状态：L0 461 用例全绿（460 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
-  真折叠↔回滚往返，以及 #11 D（POOL_MODEL v4）落地后的同日复跑），#11 C 独立探针两版各 12/12 PASS
+  **当前状态：L0 487 用例全绿（486 passed / 1 skipped）；L2 5.4.4 与 5.3.2 各 59/59 全 PASS（含路线 A
+  真折叠↔回滚往返，以及 #11 D（POOL_MODEL v4）落地后的同日复跑），#11 C 独立探针两版各 12/12 PASS，LOD 1a `scan_mesh_lod` 独立探针两版各 20/20 PASS，
+  且 1a 落地后两版 `--skip-assets` 夹具复跑各 56/56 全 PASS（新增 domain 模块不扰动既有真值）
   → 跨版本矩阵两列达标；仍欠 5.5/5.8/5.1（本机无引擎）。
   可合并，发版仍需用户明确授权。**
 
@@ -296,6 +305,8 @@
 - [x] PR-3：Nanite 写（`opt_mesh_set_nanite` + `fix_nanite_translucent`，主攻跨版本 API）。
 - [x] PR-4：HISM 合批——只读（`analyze_instancing` + `drawcall_batching` 规则 + 路线 B 方案落盘）与
   执行（路线 A `opt_collapse_hism` 真折叠 + 回滚清单 + `--hism-roundtrip` 真机往返）均已完成。
+- [ ] #13 LOD 族：1a `scan_mesh_lod`（只读阶梯诊断 + `force_min_lod` 候选）已完成（L0 25 用例 +
+  真机探针两版各 20/20）；1b `opt_mesh_set_min_lod`（写·双钥 + 原值回滚）待做。
 - [x] #11 C：`scan_missing_source_files`（只读缺源诊断，五档 verdict + 目录聚合）；L0 16 用例 +
   真机探针 5.3.2/5.4.4 各 12/12；A″ 已定案不做，#11 至此四项（A/B/B2/C/D）全部收口。
 

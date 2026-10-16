@@ -26,3 +26,4 @@ from . import opt_texture  # noqa: E402,F401  # v1.5 PR-1/2：纹理流送池诊
 from . import opt_nanite  # noqa: E402,F401  # v1.5 PR-1/3：Nanite 候选/冲突 + 批量开关
 from . import opt_instancing  # noqa: E402,F401  # v1.5 PR-1：HISM 合批分析（只出方案）
 from . import opt_hism  # noqa: E402,F401  # v1.5 PR-5：HISM 折叠执行（路线 A，写场景 + 回滚清单）
+from . import opt_lod  # noqa: E402,F401  # 复盘 #13：LOD 阶梯只读诊断（写面另成 opt_mesh_set_min_lod）

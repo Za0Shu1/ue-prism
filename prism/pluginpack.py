@@ -37,6 +37,7 @@ ENGINE_MODULES = [
     "domain/opt_nanite.py",
     "domain/opt_instancing.py",
     "domain/opt_hism.py",
+    "domain/opt_lod.py",
 ]
 
 # 绝不进插件：MCP 协议层 / 命令行 / 离线分析（留在 pip 侧）。用于校验装配产物。

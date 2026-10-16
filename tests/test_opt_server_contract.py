@@ -15,7 +15,7 @@ NEW_TOOLS = ("scan_texture_streaming", "opt_texture_set_virtual",
              "opt_texture_clamp_max_size", "opt_texture_set_compression",
              "scan_nanite_candidates", "opt_mesh_set_nanite",
              "fix_nanite_translucent", "analyze_instancing",
-             "opt_collapse_hism")
+             "opt_collapse_hism", "scan_mesh_lod")
 
 
 class _Fake(object):
@@ -53,7 +53,7 @@ def test_new_tools_are_registered():
     names = {t.__name__ for t in server._TOOLS}
     assert set(NEW_TOOLS) <= names
     assert "scan_missing_source_files" in names
-    assert len(server._TOOLS) == 31
+    assert len(server._TOOLS) == 32
 
 
 # ---------- 只读工具转发 ----------
@@ -103,6 +103,18 @@ def test_scan_missing_source_files_forwards_limits(monkeypatch):
 
 
 # ---------- 写工具的双钥转发 ----------
+
+def test_scan_mesh_lod_forwards_scope_and_thresholds(monkeypatch):
+    """LOD 只读诊断：参数原样下总线，超时给足（窗口内逐个载入网格度量 LOD 面）。"""
+    h = _install(monkeypatch, _ok({"items": [], "summary": {"measured": 0}}))
+    env = server.scan_mesh_lod(folder="/Game/M", map="/Game/Main", min_triangles=99999,
+                               max_assets=7, top=3, offset=21)
+    fn, args = h["c"].calls[0]
+    assert env["ok"] is True and fn == "scan_mesh_lod"
+    assert args == {"folder": "/Game/M", "map": "/Game/Main", "paths": None,
+                    "min_triangles": 99999, "max_assets": 7, "top": 3, "offset": 21}
+    assert h["c"].timeout >= 240
+
 
 def test_write_tools_default_to_dry_run(monkeypatch):
     for name, fn in (("opt_texture_set_virtual", server.opt_texture_set_virtual),
