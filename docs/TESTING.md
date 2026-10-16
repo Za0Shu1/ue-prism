@@ -285,7 +285,7 @@ LOD 的**读**面早被 `get_asset_metrics` 真机钉过（`get_num_lods` + 每�
 - 探针产物 `probe_mesh_lod_api.json` 的 `verdict` 就是立项判据三档：`write_ok`/`read_only`/
   `nothing`。本轮 = `write_ok`（via `platform:ALL`）-> LOD 族按「只读扫描 + 每平台 Min LOD 写」立项。
 
-## LOD 1a 真机探针（`probe_mesh_lod_scan.py`，2026-10-16）
+## LOD 族真机探针（`probe_mesh_lod_scan.py`，2026-10-16：1a 只读 + 1b 写面往返）
 
 立项探针只回答「API 到不到得着」，这一支回答「`scan_mesh_lod` 在真引擎上读到的数对不对、
 判据会不会被实测值真的推动」。同样**不进 59 项门禁**——多造一个网格副本会牵动孤儿/引用/
@@ -296,7 +296,8 @@ LOD 的**读**面早被 `get_asset_metrics` 真机钉过（`get_num_lods` + 每�
 它直连**插件里那份** `prism/domain/`（先逐字节比对插件落盘与仓库工作副本，不一致就判 FAIL，
 专治「改了 domain 忘了 plugin-install 的假绿」），再自己造靶：
 
-- **2026-10-16 实测：5.4.4 与 5.3.2 各 20/20 全 PASS**，`api_hits_by_scan` 两版逐条一致。
+- **2026-10-16 实测：5.4.4 与 5.3.2 各 32/32 全 PASS**（1a 只读 20 项 + 1b 写面 12 项），
+  `api_hits_by_scan` 两版逐条一致。
 - 已知真值复现：Cube 副本 `num_lods=1 / triangles=48 / auto_computed=True / min_lod 未覆盖`
   -> `category=ok` + `min_lod_unset`，且不在 `force_min_lod`/`weak_lod_chain` 候选里（负控）。
 - 阈值判别性：`min_triangles=1` 同一个网格必须翻成 `no_lod_highpoly` 并进候选，
@@ -305,6 +306,14 @@ LOD 的**读**面早被 `get_asset_metrics` 真机钉过（`get_num_lods` + 每�
   `min_lod_unset` 消失、`summary.min_lod_covered == 1`。这同时钉住了两版 TMap 的 python 面可解析。
 - `multi.*` 三项是机会性构造（真造出 >=2 级 LOD 就自证 ratio/建议级/收益一致性）：本轮 7 个候选面
   全 absent -> 记 `skipped` 不记 FAIL，欠的那一格由 L3 真实工程补。
+- 写面往返（1b）：`opt_mesh_set_min_lod` 的 dry-run 不落盘、单钥被 domain 挡住、双钥执行后
+  `scan_mesh_lod` 立刻读得到这条覆盖（两本账同源，不能写了读不到），清单里的 `before` 是真原值，
+  `restore=<清单>` 双钥执行回到 `ALL=-1`——夹具资产零残留（自造靶用完即删，两版 Content 目录
+  复核仍 19 个 uasset），且两版 `--skip-assets` 夹具复跑各 56/56 全 PASS。
+- Nanite 闸门：夹具的 Nanite+半透明靶在 `nanite.self_restored` 之后会被还原成**关闭**，
+  不能当正门靶；探针改为自造副本并用 `opt_mesh_set_nanite` 真开 Nanite，再验
+  「默认 skip / `skip_nanite=False` 才 change」。这类「靶的状态被上一个检查改掉」的坑，
+  正是把判据并进 59 项门禁会牵动别组真值的同一个理由。
 - `save_asset` 的关键字形态在 5.4 直接 `TypeError`（`only_if_loaded=`），探针按多形态试并把
   tried 落 JSON——这类形态漂移就是兼容矩阵要盯的东西。
 
@@ -349,7 +358,7 @@ HISM 折叠↔回滚）与 `verify_cook_chain`（cook 9 项 / package 10 项）�
   **5.3.2 夹具 59/59（2026-10-15 补跑，v1.5 优化族与 HDR 台账已在 5.3 真机钉住）**。
   更多版本（5.5/5.8/5.1/5.0）须在别的机器补跑——本机注册表里的 5.1/5.5 是卸载残留，只剩 5.3/5.4 两套引擎。
 
-## 工具覆盖矩阵（当前 32 个 MCP 工具）
+## 工具覆盖矩阵（当前 33 个 MCP 工具）
 
 | 工具 | L0 离线用例 | L2 夹具 checks | 仍欠（L3 真实工程） |
 |---|---|---|---|
@@ -375,6 +384,7 @@ HISM 折叠↔回滚）与 `verify_cook_chain`（cook 9 项 / package 10 项）�
 | `scan_nanite_candidates`（只读） | test_opt_nanite（27 用例：分类六态 + 降级键常驻 + `base_material()` 三态解包 + 材质清单非 null） | nanite.target_blocked_before_write / conflict_detected / material_usage_readable_via_base_material / material_instance_usage_not_null | 真实高模候选阈值手感（`min_triangles`）；真实工程某网格 5 材质经 `get_base_material()` 全部读到确定值 |
 | `opt_mesh_set_nanite` / `fix_nanite_translucent`（写·双钥） | test_opt_nanite（三条版本签名钉死 + 写不进必须 failed + 半透明拦截 + blend_mode 读不到保守跳过） | nanite.skip_translucent_blocks / force_write_honest / fix_write_honest / self_restored | 材质 `bUsedWithNanite` 只报不改（动材质另议）；真实工程警告回落抽检 |
 | `scan_mesh_lod`（只读，LOD 1a：阶梯诊断 + `force_min_lod` 候选） | test_opt_lod（25 用例：`judge` 六分类全覆盖——Nanite 已开必须排他且不给收益、单级高面数只给动作不给数字、LOD1/LOD0 降比超阈值判 `weak_lod_chain`、阶梯健康未覆盖判 `min_lod_actionable`、已有平台覆盖判 ok、级数读得到却全测不出三角数必须落 `unreadable` 不装 ok；旗标 `screen_size_auto_computed`/`auto_compute_unknown`/`nanite_unknown`/`min_lod_unset`/`reduction_unmeasured`；建议级落在实测窗口（LOD0-7）之外时不借别人的数字；`_try_call` 多形态 + absent、`_map_to_plain` 三形态（dict/TMap/to_dict/垃圾对象）、`read_min_lod` map 与逐平台并取、降级结构键常驻、thresholds/cap 回报、FUNCTIONS 注册） + test_opt_server_contract（参数转发与 240s 超时） | 独立探针 `probe_mesh_lod_scan`：5.3.2 / 5.4.4 各 **20/20 PASS**，不进 59 项门禁。真值靶：Cube 副本 = 1 级 / 48 三角 / `auto_computed=True` / Min LOD 未覆盖 -> 必须 `ok` 且**不得**进 `force_min_lod`；判别靶：同网格 `min_triangles=1` 必须翻成 `no_lod_highpoly` 并进候选（判据真在读实测面数）；覆盖靶：`set_minimum_lod_for_platform(ALL,2)` 写后扫描必须读回 2 且不再报 `min_lod_unset`、`summary.min_lod_covered=1`；诚实靶：不存在的路径进 `rejected`、`total=0`，不装 ok。命中面（两版逐条一致）：`get_num_lods:noarg`、`is_lod_screen_size_auto_computed:noarg`、Nanite `nanite_settings.enabled`；Min LOD 读法**无覆盖时走 `get_minimum_lod_for_platform:ALL`（空 map 不算查过）、有覆盖时走 `get_minimum_lod_for_platforms:noarg` | `weak_lod_chain` / `min_lod_actionable` 的真机靶仍欠：5.3/5.4 的 `UStaticMesh` Python 面造不出第二级 LOD（`acquire_mesh_description`/`build_from_mesh_descriptions`/`set_num_lods`/三个 EditorSubsystem 全 absent，探针已记 note 不判 FAIL），需要真实工程里带 LOD 链的网格复测；写面 `opt_mesh_set_min_lod` 属 1b |
+| `opt_mesh_set_min_lod`（写·双钥，LOD 1b：每平台 Min LOD 强制降级 + 原值清单回滚） | test_opt_lod（另 25 用例：`_to_int` 必须区分「没给」与「给了 0」；`_write_min_lod` 三条（回读相符=ok / 静默不进=failed 且 tried 带 mismatch / 无 setter=failed 不给 api）；`write_target` 缺 after 一律 failed 不猜；`inspect_target` 闸门矩阵——自动取最深级并算削减、显式级号照用、`min_lod >= num_lods` 拒写、单级网格没有可降的级、Nanite 默认挡（带 `skip_nanite=False` 可放行）、低面数按 `scan_mesh_lod` 同阈值跳过、已覆盖=no_op、级数读不到=unknown 不装 change、建议级出实测窗口打 `reduction_unmeasured`、restore 模式绕开全部优化闸门）+ 清单原子写/坏清单拒读/路径兜底 + 双钥守卫 + 无引擎降级（note 保持 no_engine 不被计划语改写） + test_opt_server_contract（33 个工具、bool 归一、`min_lod` 的 None/0 之分、空平台键兜回 ALL、300s 超时） | 同一探针的写面章节：5.3.2 / 5.4.4 各 **32/32 PASS**——dry-run 不落盘不写清单 -> 单钥被 domain 自己挡住 -> 双钥执行 `changed=1 saved=True api=set_minimum_lod_for_platform` -> `scan_mesh_lod` 立刻读回 `ALL=0` 且 `min_lod_unset` 消失 -> 清单里 `before=-1` -> `restore=<清单>` 双钥回到基线 `ALL=-1`（夹具资产零残留，探针自造靶用完即删）；Nanite 闸门用探针自造并真开 Nanite 的靶验证「默认挡、`skip_nanite=False` 放行」（夹具那个 Nanite 靶在自检后会被还原成关闭，不能当正门靶） | `no_op`/`skip` 的判据真机正样本目前只有单级 Cube 一档；真实工程多平台覆盖 （Android/IOS 各自设过）的读回形态待 L3 抽检 |
 | `analyze_instancing`（只读，D2 路线 B） | test_opt_instancing（分组/阻断/drawcall 前后纯逻辑） | compose.instancing_groups | 折叠动作本身交给 `opt_collapse_hism`；真实工程关卡仍需人工确认 blockers |
 | `opt_collapse_hism`（写·双钥，路线 A） | test_opt_hism（25 用例：拒收 blockers/材质覆盖/over_limit + 双钥先于引注 + 假引注折叠→清单→回滚闭环 + 5.4 路线钉死（裸 Actor + `new_object` HISM 根组件、专用类/旧组件名兜底/什么都没绑的诚实失败）+ 实例写不满/变换读不到时整组退回不销毁 + 回滚网格只认回读） | hism.plan_does_not_touch_scene / collapse_needs_double_key / bad_mode_is_rejected；`--hism-roundtrip` 另跑 collapse_reduces_actors（含容器被认成已实例化）+ restore_round_trips + restore_puts_meshes_back | 清单只保类/网格/变换/标签/子关卡：碰撞、光照绑定、蓝图绑定不承诺复原；对象名由引注重分配（身份靠 label） |
 | 基建（bus/envelope/cli/pluginpack/resolve） | test_bus / test_buscall / test_cli / test_pluginpack / test_resolve | - | - |

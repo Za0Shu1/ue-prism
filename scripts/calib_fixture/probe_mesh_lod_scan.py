@@ -7,7 +7,11 @@ used_by 与目录预算的读数就可能跟着动）。这里自建真值、自
 2) 已知真值能否复现：Cube 副本 = 1 级 LOD / 48 三角 / auto_computed True / min_lod 未覆盖；
    探针靶把 ALL 平台 Min LOD 写成 2 后，扫描必须读回 2 且不再报 min_lod_unset；
 3) 阈值判别性：同一个网格在 min_triangles=1 下必须翻成 no_lod_highpoly 并进候选，
-   在默认阈值下必须是 ok——判据不是常量，是真的在读实测面数。
+   在默认阈值下必须是 ok——判据不是常量，是真的在读实测面数；
+4) 1b 写面往返（opt_mesh_set_min_lod）：dry-run 不落盘也不写清单 -> 单钥必须被 domain
+   自己挡住 -> 双钥执行写 ALL=0 且回读相符 -> 只读扫描立刻看得到这条覆盖 -> 清单里
+   before 记的是原值 -1 -> restore 按清单回到基线。夹具 Nanite 靶另跑 dry-run，
+   证明 Nanite 闸门真把强制降级挡在外面（写了只损画质）。
 
 多级 LOD 靶是机会性构造（`probe_mesh_lod_api.py` 实证 StaticMesh 没留 Python 造 LOD 的面）：
 造得出来就自证一致性（ratio/建议级/收益数字与自己测到的行相符），造不出来记 skipped 不记 FAIL。
@@ -399,6 +403,9 @@ def main():
                       (res2.get("summary") or {}).get("min_lod_covered") == 1,
                       res2.get("summary"))
 
+    # ---------- 1b 写面：apply -> 清单 -> restore 往返 ----------
+    _write_roundtrip(rep, ol)
+
     # ---------- 机会性多 LOD 靶：造得出就自证一致性 ----------
     multi_pkg = _try_multi_lod_target(rep)
     if multi_pkg:
@@ -439,6 +446,124 @@ def main():
     _finish(rep, out, None)
 
 
+def _out_dir():
+    try:
+        content = unreal.Paths.project_content_dir()
+        base = os.path.dirname(str(content).rstrip("/\\"))
+    except Exception:
+        base = os.getcwd()
+    return os.environ.get("PRISM_PROBE_OUT") or os.path.join(base, "Saved", "PrismFixture")
+
+
+def _write_roundtrip(rep, ol):
+    """1b 写面真值往返：dry-run 不落盘 -> 双钥执行 -> 扫描读得到 -> 按清单回滚 -> 基线复位。
+
+    靶是探针自造的 Cube 副本（夹具资产一个都不写），Nanite 闸门那条只跑 dry-run。
+    """
+    EAL = unreal.EditorAssetLibrary
+    probe = FOLDER + "/SM_LodWriteProbe"
+    _drop(probe)
+    if EAL.duplicate_asset(BASE_CUBE, probe) is None:
+        rep.check("write.target_created", False, probe)
+        return
+    _registry_scan(FOLDER)
+    manifest = os.path.join(_out_dir(), "minlod_manifest_probe.json")
+    try:
+        if os.path.isfile(manifest):
+            os.remove(manifest)
+    except Exception:
+        pass
+
+    # 1) dry-run：只出计划，不落盘、不写清单
+    env = ol.opt_mesh_set_min_lod(paths=probe, min_triangles=0, min_lod=0, dry_run=True)
+    r = (env or {}).get("result") or {}
+    rep.check("write.dry_run_plans", r.get("executed") is False and r.get("planned") == 1,
+              {"executed": r.get("executed"), "planned": r.get("planned"),
+               "targets": (r.get("targets") or [])[:1]})
+    rep.check("write.dry_run_no_manifest", not os.path.isfile(manifest), manifest)
+
+    # 2) 单钥必须被 domain 自己挡住（server 层归一之外，domain 也得守）
+    env_g = ol.opt_mesh_set_min_lod(paths=probe, min_triangles=0, min_lod=0,
+                                    dry_run=False, confirm=False)
+    rep.check("write.double_key_guarded", env_g.get("ok") is False,
+              (env_g.get("error") or {}).get("message"))
+
+    # 3) 双钥执行：写 ALL=0 + 落原值清单
+    env_x = ol.opt_mesh_set_min_lod(paths=probe, min_triangles=0, min_lod=0,
+                                    dry_run=False, confirm=True, manifest=manifest)
+    rx = (env_x or {}).get("result") or {}
+    changed_rows = [row for row in (rx.get("targets") or []) if row.get("kind") == "change"]
+    rep.check("write.executed_one", rx.get("executed") is True and rx.get("changed") == 1
+              and not rx.get("failed"),
+              {"changed": rx.get("changed"), "failed": rx.get("failed"),
+               "note": rx.get("note")})
+    rep.check("write.saved_and_api", bool(changed_rows)
+              and all(row.get("saved") for row in changed_rows)
+              and all((row.get("api") or "").startswith("set_minimum_lod_for_platform")
+                      for row in changed_rows),
+              changed_rows[:1])
+    rep.check("write.manifest_written", os.path.isfile(manifest)
+              and rx.get("rollback_available") is True,
+              {"path": rx.get("manifest_path"), "err": rx.get("manifest_error")})
+    plan = ol._read_manifest(manifest) if os.path.isfile(manifest) else None
+    entries = (plan or {}).get("entries") or []
+    rep.check("write.manifest_keeps_before", len(entries) == 1
+              and entries[0].get("before") == -1 and entries[0].get("after") == 0,
+              entries[:1])
+
+    # 4) 只读扫描必须立刻看到这条覆盖（两本账同源，不能写了读不到）
+    res = ol.scan_mesh_lod(paths=probe)
+    item = _item_of(res, probe)
+    got = (item or {}).get("min_lod_by_platform") or {}
+    rep.check("write.visible_to_scan", got.get("ALL") == 0
+              and "min_lod_unset" not in ((item or {}).get("flags") or []),
+              {"ALL": got.get("ALL"), "flags": (item or {}).get("flags")})
+
+    # 5) Nanite 闸门：给探针自造的副本真开 Nanite（夹具资产一律不写），dry-run 必须被挡
+    nano = FOLDER + "/SM_LodWriteNano"
+    _drop(nano)
+    if EAL.duplicate_asset(BASE_CUBE, nano) is None:
+        rep.note("write.nanite_gate_blocks", "skipped: 造不出 Nanite 靶（duplicate 失败）")
+    else:
+        _registry_scan(FOLDER)
+        on_mod = ol._n            # 同一个 domain 模块实例：用真写面开 Nanite 才算正门靶
+        env_on = (on_mod.opt_mesh_set_nanite(paths=nano, enabled=True, dry_run=False,
+                                             confirm=True) or {})
+        ron = env_on.get("result") or {}
+        if ron.get("changed") != 1:
+            rep.note("write.nanite_gate_blocks",
+                     "skipped: Nanite 没开成功 changed=%s failed=%s"
+                     % (ron.get("changed"), ron.get("failed")))
+        else:
+            env_n = ol.opt_mesh_set_min_lod(paths=nano, min_triangles=0, min_lod=0,
+                                            dry_run=True)
+            rn = (env_n or {}).get("result") or {}
+            n_rows = rn.get("targets") or []
+            rep.check("write.nanite_gate_blocks", rn.get("planned") == 0
+                      and any(row.get("kind") == "skip"
+                              and "Nanite" in (row.get("reason") or "") for row in n_rows),
+                      {"planned": rn.get("planned"),
+                       "row": {"kind": (n_rows or [{}])[0].get("kind"),
+                               "reason": (n_rows or [{}])[0].get("reason")}})
+            free = ol.opt_mesh_set_min_lod(paths=nano, min_triangles=0, min_lod=0,
+                                           dry_run=True, skip_nanite=False)
+            rf = (free or {}).get("result") or {}
+            rep.check("write.nanite_gate_can_be_released", rf.get("planned") == 1,
+                      {"planned": rf.get("planned"), "mode": rf.get("mode")})
+        _drop(nano)
+
+    # 6) 按清单回滚 -> 基线复位（夹具不留残余写）
+    env_r = ol.opt_mesh_set_min_lod(restore=manifest, dry_run=False, confirm=True)
+    rr = (env_r or {}).get("result") or {}
+    rep.check("restore.executed", rr.get("changed") == 1 and rr.get("mode") == "restore"
+              and not rr.get("failed"),
+              {"changed": rr.get("changed"), "mode": rr.get("mode"),
+               "failed": rr.get("failed"), "note": rr.get("note")})
+    res2 = ol.scan_mesh_lod(paths=probe)
+    got2 = (_item_of(res2, probe) or {}).get("min_lod_by_platform") or {}
+    rep.check("restore_back_to_baseline", got2.get("ALL") == -1, {"ALL": got2.get("ALL")})
+    _drop(probe)
+
 def _finish(rep, out, _res):
     fails = [r for r in rep.rows if r.get("pass") is False]
     passed = [r for r in rep.rows if r.get("pass") is True]
@@ -447,12 +572,7 @@ def _finish(rep, out, _res):
                      "note": len([r for r in rep.rows if r.get("kind") == "note"])}
     out["fails"] = [r["name"] for r in fails]
     out["elapsed_s"] = round(time.time() - rep.started, 2)
-    try:
-        content = unreal.Paths.project_content_dir()
-        out_dir = os.environ.get("PRISM_PROBE_OUT") or os.path.join(
-            os.path.dirname(str(content).rstrip("/\\")), "Saved", "PrismFixture")
-    except Exception:
-        out_dir = os.environ.get("PRISM_PROBE_OUT") or os.getcwd()
+    out_dir = _out_dir()
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir)
     tmp = os.path.join(out_dir, OUT_NAME + ".tmp")
@@ -473,9 +593,7 @@ if __name__ == "__main__":
         err = traceback.format_exc()
         _say("LODSCAN-PROBE CRASH " + err)
         try:
-            content = unreal.Paths.project_content_dir()
-            d = os.environ.get("PRISM_PROBE_OUT") or os.path.join(
-                os.path.dirname(str(content).rstrip("/\\")), "Saved", "PrismFixture")
+            d = _out_dir()
             if not os.path.isdir(d):
                 os.makedirs(d)
             with io.open(os.path.join(d, OUT_NAME + ".tmp"), "w", encoding="utf-8", newline="") as f:

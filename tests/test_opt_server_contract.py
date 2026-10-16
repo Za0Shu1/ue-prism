@@ -15,7 +15,7 @@ NEW_TOOLS = ("scan_texture_streaming", "opt_texture_set_virtual",
              "opt_texture_clamp_max_size", "opt_texture_set_compression",
              "scan_nanite_candidates", "opt_mesh_set_nanite",
              "fix_nanite_translucent", "analyze_instancing",
-             "opt_collapse_hism", "scan_mesh_lod")
+             "opt_collapse_hism", "scan_mesh_lod", "opt_mesh_set_min_lod")
 
 
 class _Fake(object):
@@ -53,7 +53,7 @@ def test_new_tools_are_registered():
     names = {t.__name__ for t in server._TOOLS}
     assert set(NEW_TOOLS) <= names
     assert "scan_missing_source_files" in names
-    assert len(server._TOOLS) == 32
+    assert len(server._TOOLS) == 33
 
 
 # ---------- 只读工具转发 ----------
@@ -116,12 +116,44 @@ def test_scan_mesh_lod_forwards_scope_and_thresholds(monkeypatch):
     assert h["c"].timeout >= 240
 
 
+def test_opt_mesh_set_min_lod_normalises_keys_and_optional_int(monkeypatch):
+    """写面契约最容易漏的三处：bool 归一、min_lod 的 None 与 0 必须可区分、平台键兜底 ALL。"""
+    h = _install(monkeypatch, _ok({"op": "opt_mesh_set_min_lod", "targets": []}))
+    server.opt_mesh_set_min_lod(paths="/Game/M/X", min_lod="2", manifest="C:/tmp/m.json")
+    fn, args = h["c"].calls[0]
+    assert fn == "opt_mesh_set_min_lod"
+    assert args["min_lod"] == 2 and args["platform"] == "ALL"
+    assert args["skip_nanite"] is True and args["dry_run"] is True and args["confirm"] is False
+    assert args["min_triangles"] == 200000 and args["restore"] is None
+    assert args["manifest"] == "C:/tmp/m.json"
+    assert h["c"].timeout >= 300
+
+    # min_lod 不传 = 逐网格取最深级；传 0 = 合法的"回到 LOD0"，两者绝不能混成一回事
+    h2 = _install(monkeypatch, _ok({"op": "x"}))
+    server.opt_mesh_set_min_lod(folder="/Game/M")
+    _fn, a2 = h2["c"].calls[0]
+    assert a2["min_lod"] is None
+    h3 = _install(monkeypatch, _ok({"op": "x"}))
+    server.opt_mesh_set_min_lod(folder="/Game/M", min_lod=0)
+    assert h3["c"].calls[0][1]["min_lod"] == 0
+
+    # 脏 bool 归一后下总线；空平台键兜回 ALL
+    h4 = _install(monkeypatch, _ok({"op": "x"}))
+    server.opt_mesh_set_min_lod(folder="/Game/M", platform="", skip_nanite="no",
+                                dry_run="0", confirm="on", restore="/tmp/r.json")
+    _fn, a4 = h4["c"].calls[0]
+    assert a4["platform"] == "ALL" and a4["skip_nanite"] is False
+    assert a4["dry_run"] is False and a4["confirm"] is True
+    assert a4["restore"] == "/tmp/r.json"
+
+
 def test_write_tools_default_to_dry_run(monkeypatch):
     for name, fn in (("opt_texture_set_virtual", server.opt_texture_set_virtual),
                      ("opt_texture_clamp_max_size", server.opt_texture_clamp_max_size),
                      ("opt_texture_set_compression", server.opt_texture_set_compression),
                      ("opt_mesh_set_nanite", server.opt_mesh_set_nanite),
-                     ("fix_nanite_translucent", server.fix_nanite_translucent)):
+                     ("fix_nanite_translucent", server.fix_nanite_translucent),
+                     ("opt_mesh_set_min_lod", server.opt_mesh_set_min_lod)):
         h = _install(monkeypatch, _ok({"op": name}))
         fn(folder="/Game/X")
         _fn, args = h["c"].calls[0]

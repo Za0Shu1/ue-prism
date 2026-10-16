@@ -905,6 +905,37 @@ def scan_mesh_lod(folder: Annotated[str, Field(description="Content 下目录前
          "max_assets": int(max_assets), "top": int(top), "offset": int(offset)})
 
 
+def opt_mesh_set_min_lod(paths: Annotated[str | None, Field(description="要改的网格；给了则忽略 folder/map")] = None, folder: Annotated[str, Field(description="批量范围（默认 /Game）")] = "/Game", map: Annotated[str | None, Field(description="改按关卡 uses 闭包选网格")] = None, platform: Annotated[str, Field(description="写哪个平台键的 Min LOD（默认 ALL；实测 ALL/Windows/WindowsNoEditor 均可读写）")] = "ALL", min_lod: Annotated[int | None, Field(description="目标级号；留空=逐网格取最深级(num_lods-1)，-1=清除覆盖回引擎默认")] = None, skip_nanite: Annotated[bool, Field(description="默认 true=Nanite 网格不动（细节由 Nanite 管，强制降级只损画质）")] = True, min_triangles: Annotated[int, Field(description="LOD0 低于此三角数默认跳过（低面数强制降级没收益，0=全改）")] = 200000, limit: Annotated[int, Field(description="本窗口最多处理多少个网格")] = 200, offset: Annotated[int, Field(description="分页偏移")] = 0, manifest: Annotated[str | None, Field(description="执行时原值清单的落盘路径（默认 <Project>/Saved/Prism/minlod_*.json）；dry-run 不落盘")] = None, restore: Annotated[str | None, Field(description="回滚模式：传之前落盘的清单路径，按记录的 before 逐条写回（同样双钥）")] = None, dry_run: Annotated[bool, Field(description="默认 true=只回计划")] = True, confirm: Annotated[bool, Field(description="真实执行需 dry_run=False 且 confirm=True 双钥")] = False, project: Annotated[str | None, Field(description="工程选择器：名称/路径/slug；仅一个活跃工程时可省略")] = None):
+    """强制每平台 Min LOD（写·双钥；复盘 #13 · 1b）。Needs live bridge.
+
+    LOD 族唯一被探针实证「可写且回读相符」的动作面：每级 ScreenSize 阈值在 UE Python
+    读不到也写不到，所以本工具不碰阈值。写入走 set_minimum_lod_for_platform + 回读校验，
+    不符即 failed（附实测值），绝不假成功；执行时落一份原值清单，restore=<清单路径> 可回滚。
+    闸门：Nanite 网格默认不动、低面数默认跳过、min_lod >= num_lods 一律拒写。
+    收益是三角数（单实例单帧），不是 MB，不与纹理池那本账相加。
+    """
+    bus_dir, _pd, err = _resolve(project)
+    if err:
+        return err
+    skip_nanite, e0 = _bool_opt("skip_nanite", skip_nanite, True)
+    dry_run, e1 = _bool_opt("dry_run", dry_run, True)
+    confirm, e2 = _bool_opt("confirm", confirm, False)
+    if e0 or e1 or e2:
+        return e0 or e1 or e2
+    want = None
+    if min_lod is not None and str(min_lod).strip() != "":
+        try:
+            want = int(min_lod)
+        except (TypeError, ValueError):
+            want = None
+    return bus.BusClient(bus_dir, timeout=300).call(
+        "opt_mesh_set_min_lod",
+        {"paths": paths, "folder": folder, "map": map, "platform": str(platform or "ALL"),
+         "min_lod": want, "skip_nanite": skip_nanite, "min_triangles": int(min_triangles),
+         "limit": int(limit), "offset": int(offset), "manifest": manifest,
+         "restore": restore, "dry_run": dry_run, "confirm": confirm})
+
+
 _TOOLS = (
 
     ping, list_level_actors, describe_asset, get_asset_references, get_asset_metrics,
@@ -918,7 +949,7 @@ _TOOLS = (
     opt_texture_set_compression, scan_nanite_candidates, opt_mesh_set_nanite,
     fix_nanite_translucent, analyze_instancing, opt_collapse_hism,
     scan_missing_source_files,
-    scan_mesh_lod,
+    scan_mesh_lod, opt_mesh_set_min_lod,
 )
 
 

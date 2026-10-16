@@ -549,7 +549,9 @@ def drive(op, terms, paths, folder, map_path, limit, offset, dry_run, confirm,
                "savings_mb": decision.get("savings_mb")}
         for key in ("reason", "source_width", "current_size", "runtime_mb", "triangles",
                     "materials", "translucent", "detail", "format_class",
-                    "permanent_release_mb", "size_unverified"):
+                    "permanent_release_mb", "size_unverified",
+                    "platform", "num_lods", "nanite_enabled", "potential_triangles",
+                    "suggested_min_lod"):
             if decision.get(key) is not None:
                 row[key] = decision[key]
         if kind == "no_op":

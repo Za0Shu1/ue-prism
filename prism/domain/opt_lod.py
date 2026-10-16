@@ -14,6 +14,11 @@
 """
 from __future__ import annotations
 
+import io
+import json
+import os
+import time
+
 from .. import envelope
 from . import metrics as _m
 from . import opt_nanite as _n
@@ -340,3 +345,370 @@ def scan_mesh_lod(folder="/Game", map=None, paths=None,
         result["scan_note"] = ("本窗仅度量 %d 个网格（候选与两本账为该窗口内值），"
                                "翻页 offset=%d 可继续。" % (len(rows), offset + max_assets))
     return result
+
+
+# ---------------------------------------------------------------------------
+# 1b：每平台 Min LOD 强制降级（写·双钥）。阈值面探针实证改不了，写面只走这一条正门。
+# ---------------------------------------------------------------------------
+
+OP = "opt_mesh_set_min_lod"
+MANIFEST_VERSION = 1
+
+
+def _to_int(value, default=None):
+    """归一整数：None/空串/非法 -> default（区分"没给"与"给了 0"，这里 0 是合法值）。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return default
+
+
+def _write_json_atomic(path, payload):
+    """半截清单等于没有回滚：同 bus 口径的 .tmp + os.replace。"""
+    folder = os.path.dirname(str(path))
+    if folder and not os.path.isdir(folder):
+        os.makedirs(folder)
+    tmp = str(path) + ".tmp"
+    with io.open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=1)
+    os.replace(tmp, str(path))
+    return str(path)
+
+
+def _read_manifest(path):
+    try:
+        with io.open(str(path), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
+        return None
+    return payload
+
+
+def _manifest_path(unreal, given, op):
+    if given:
+        return str(given)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    root = ""
+    for getter in (lambda: unreal.SystemLibrary.get_project_saved_directory(),
+                   lambda: os.path.join(str(unreal.Paths.project_dir()), "Saved")):
+        try:
+            value = getter()
+        except Exception:
+            value = None
+        if value:
+            root = str(value).rstrip("/\\")
+            break
+    if not root:
+        root = os.path.join(os.getcwd(), "Saved")
+    return os.path.join(root, "Prism", "%s_%s.json" % (op, stamp))
+
+
+def _lod_rows(unreal, obj, tried):
+    """(num_lods, {index: triangles})：metrics 的窗口最深到 LOD7，越界就不给数字。"""
+    mtried = []
+    metrics = None
+    try:
+        metrics = _m._measure_mesh(unreal, obj, mtried)
+    except Exception:
+        metrics = None
+    tried.extend(mtried)
+    nv, via, vt = _try_call(obj, "get_num_lods", [((), "noarg")])
+    tried.extend(vt)
+    rows = (metrics or {}).get("lods") or []
+    per = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("triangles") is not None:
+            per[_int(row.get("index"), len(per))] = _int(row.get("triangles"), 0)
+    num = _int(nv, 0) if nv is not None else (len(rows) if rows else 0)
+    return num, per, (via or ("lods:%d" % len(rows)))
+
+
+def _min_lod_view(obj):
+    """(当前平台覆盖字典, 命中签名, tried)：map 与逐平台并取（与只读扫描同一口径）。"""
+    return read_min_lod(obj)
+
+
+def _write_min_lod(obj, platform, want):
+    """写每平台 Min LOD 并回读校验；写不进/读不回一律 failed，绝不假成功。
+
+    保存由 `optutil.drive` 统一调（save_asset），回滚清单落在 opt_mesh_set_min_lod 里。
+    """
+    tried = []
+    before, _bvia, bt = _min_lod_view(obj)
+    tried.extend(bt)
+    before_val = _int((before or {}).get(platform), -1)
+    if before_val == want:
+        return True, "no_write_needed", tried
+    api = None
+    for label, call in (
+        ("set_minimum_lod_for_platform(%s,%d)" % (platform, want),
+         lambda: obj.set_minimum_lod_for_platform(platform, want)),
+    ):
+        try:
+            call()
+            api = label
+            tried.append({"sig": label, "err": ""})
+            break
+        except Exception as exc:
+            tried.append({"sig": label, "err": "%s:%s" % (type(exc).__name__, str(exc)[:120])})
+    if api is None:
+        return False, None, tried
+    after_map, avia, at = _min_lod_view(obj)
+    tried.extend(at)
+    after_val = _int((after_map or {}).get(platform), -1)
+    if after_val != want:
+        # 写进去了但回读不符：按失败报，附带实测值——这是最容易被假装成功的一步
+        tried.append({"sig": "readback(" + str(avia) + ")",
+                      "err": "mismatch got=%s want=%s before=%s" % (after_val, want, before_val)})
+        return False, api, tried
+    return True, api, tried
+
+
+def inspect_target(unreal, obj, target, platform, want, block_nanite, min_tri, tried,
+                   restore_value=None):
+    """单项判定（模块级，L0 直接钉闸门语义；drive 的 inspect 闭包只负责转参）。
+
+    `restore_value` 非 None 即回滚模式：目标值来自清单记录的原值，优化闸门一律不开。
+    行 kind 语义由 `optutil.drive` 解释：change=待改/已改、no_op=已达标、
+    skip=不该动（带原因）、其它=判定失败（带 tried）。
+    """
+    if restore_value is not None:
+        cur, cur_via, ct = _min_lod_view(obj)
+        tried.extend(ct)
+        now = _int((cur or {}).get(platform), -1)
+        row = {"platform": platform, "num_lods": None, "before": now, "after": restore_value}
+        if now == restore_value:
+            return dict(row, kind="no_op",
+                        reason="%s 已是 %d（清单值），无需回滚（读法 %s）"
+                               % (platform, restore_value, cur_via))
+        return dict(row, kind="change", detail={"mode": "restore", "read_via": cur_via})
+
+    num, per, _num_via = _lod_rows(unreal, obj, tried)
+    cur, cur_via, ct = _min_lod_view(obj)
+    tried.extend(ct)
+    now = _int((cur or {}).get(platform), -1)
+    nanite, nanite_api, nt = _n._read_nanite(obj)
+    tried.extend(nt)
+    tri0 = per.get(0)
+    row = {"platform": platform, "num_lods": num, "nanite_enabled": nanite,
+           "before": now, "triangles": tri0}
+    if not num:
+        return dict(row, kind="unknown", after=want,
+                    reason="LOD 级数读不到（get_num_lods 不命中？）", tried=tried[-6:])
+    target_lod = (num - 1) if want is None else want
+    row["suggested_min_lod"] = target_lod
+    if target_lod >= num:
+        return dict(row, kind="skip", after=now,
+                    reason="min_lod=%d >= num_lods=%d：会没级可画，拒写（要清覆盖带 min_lod=-1）"
+                           % (target_lod, num))
+    if num < 2 and want is None:
+        return dict(row, kind="skip", after=now,
+                    reason="只有一级 LOD：没有可降的级，收益为零；补 LOD 属美术侧"
+                           "（scan_mesh_lod 的 no_lod_highpoly）")
+    if nanite is True and block_nanite:
+        return dict(row, kind="skip", after=now,
+                    reason="Nanite 已开(%s)：细节由 Nanite 管，强制 Min LOD 只损画质；"
+                           "确要动带 skip_nanite=False" % nanite_api)
+    if tri0 is not None and tri0 < min_tri:
+        return dict(row, kind="skip", after=now,
+                    reason="LOD0 仅 %d 三角 < 阈值 %d：强制降级没收益（要一起改带 min_triangles=0）"
+                           % (tri0, min_tri))
+    if now == target_lod:
+        return dict(row, kind="no_op", after=now,
+                    reason="%s 平台已是 LOD%d（读法 %s）" % (platform, target_lod, cur_via))
+    potential = 0
+    deep = per.get(target_lod)
+    if tri0 and deep is not None:
+        potential = max(0, tri0 - int(deep))
+    row["potential_triangles"] = potential
+    detail = {"read_via": cur_via, "lod_window": len(per)}
+    if not potential:
+        # 报了动作但报不出削减量（建议级在实测窗口 LOD0-7 之外）：明说一句，不含糊
+        detail["note"] = "reduction_unmeasured"
+    return dict(row, kind="change", after=target_lod, savings_mb=0.0, detail=detail)
+
+
+def write_target(obj, decision, default_platform):
+    """写入并回读校验（drive 的 write 闭包只负责转参）。目标值缺失一律 failed，不猜。"""
+    platform = decision.get("platform") or default_platform
+    want_i = _to_int(decision.get("after"), None)
+    if want_i is None:
+        return False, None, [{"sig": "decision.after", "err": "missing"}]
+    return _write_min_lod(obj, platform, want_i)
+
+@register
+def opt_mesh_set_min_lod(paths=None, folder="/Game", map=None, platform="ALL",
+                         min_lod=None, skip_nanite=True, min_triangles=DEFAULT_MIN_TRIANGLES,
+                         limit=200, offset=0, manifest=None, restore=None,
+                         dry_run=True, confirm=False):
+    """强制每平台 Min LOD（写·双钥）：远处/次要网格直接用最深的 LOD 级，省的是三角数与帧时间。
+
+    这是 LOD 族唯一被探针实证「可写且回读相符」的动作面（5.3.2/5.4.4 一致）；每级
+    ScreenSize 阈值在 UE Python 上读不到也写不到，所以本工具不碰阈值，也不承诺"改阈值"。
+
+    参数与闸门：
+    - platform：写哪个平台键（默认 ALL；探针实证 ALL/Windows/WindowsNoEditor 均可读写）。
+    - min_lod：目标级号；留空=逐网格取最深级（num_lods-1）。-1 = 清除覆盖回到引擎默认。
+      绝不会写 >= num_lods 的值（那会让网格无级可画）。
+    - min_triangles：默认 20 万，与 scan_mesh_lod 同口径——低面数网格强制降级没收益，默认跳过。
+    - skip_nanite：默认 true，Nanite 网格不动（细节由 Nanite 自己管，强制 Min LOD 只损画质）。
+    - manifest：执行时把「原值」落一份回滚清单（默认 <Project>/Saved/Prism/minlod_*.json）；
+      dry-run 不落盘。restore=<清单路径> 即按原值逐条写回（同样双钥，闸门全不开）。
+    - 收益口径是**三角数（单实例单帧）**，不是 MB，不与纹理池那本账相加；实例数/可见性
+      不在这里（关卡面走 analyze_instancing / list_level_actors(compose)）。
+    双钥：dry_run=False 且 confirm=True 才落盘。无引擎时 executed=False + note=no_engine。
+    """
+    want = _to_int(min_lod, None)
+    block_nanite = _u.to_bool(skip_nanite, True)
+    min_tri = _int(min_triangles, DEFAULT_MIN_TRIANGLES)
+    plat = str(platform or "ALL").strip() or "ALL"
+    restore_path = str(restore) if restore else None
+
+    plan = None
+    if restore_path:
+        plan = _read_manifest(restore_path)
+        if plan is None:
+            return envelope.make_err(envelope.Code.RUNTIME_ERROR,
+                                     "%s restore 读不到合法清单（需 entries 数组）：%s"
+                                     % (OP, restore_path))
+        if plan.get("op") != OP:
+            return envelope.make_err(envelope.Code.RUNTIME_ERROR,
+                                     "%s restore 清单的 op=%r 不是本工具写的"
+                                     % (OP, plan.get("op")))
+        lookup = {}
+        for entry in plan.get("entries") or []:
+            if not isinstance(entry, dict) or not entry.get("package"):
+                continue
+            lookup[str(entry["package"])] = (str(entry.get("platform") or plat),
+                                             _to_int(entry.get("before"), -1))
+        pkgs = ",".join(sorted(lookup))
+        if not pkgs:
+            return envelope.make_err(envelope.Code.RUNTIME_ERROR,
+                                     "%s restore 清单里没有条目：%s" % (OP, restore_path))
+        paths = pkgs
+        limit = len(lookup)
+
+    def inspect(unreal, obj, target, tried):
+        if restore_path:
+            plat_i, want_i = lookup.get(target["package"], (plat, -1))
+            return inspect_target(unreal, obj, target, plat_i, want, block_nanite,
+                                  min_tri, tried, restore_value=want_i)
+        return inspect_target(unreal, obj, target, plat, want, block_nanite,
+                              min_tri, tried)
+
+    def write(unreal, obj, decision, target):
+        return write_target(obj, decision, plat)
+
+    extra = {"mode": "restore" if restore_path else "apply",
+             "platform": plat, "min_lod": want, "skip_nanite": block_nanite,
+             "thresholds": {"min_triangles": min_tri},
+             "restore_manifest": restore_path,
+             "manifest_for_write": str(manifest) if manifest else None,
+             "manifest_path": None, "rollback_available": False}
+    result = _u.drive(OP, _u.MESH_TERMS, paths, folder, map if not restore_path else None,
+                      limit, offset, dry_run, confirm, inspect, write, extra=extra)
+    if not (isinstance(result, dict) and result.get("ok")):
+        return result
+    payload = result["result"] if "result" in result else result
+    _finish_manifest(payload, restore_path)
+    return result
+
+
+def _finish_manifest(payload, restore_path):
+    """执行成功 -> 落原值清单；dry-run 与 restore 模式不落（restore 本身就是回滚）。"""
+    if payload.get("note") == "no_engine":
+        return                              # 降级契约：note 原样留 no_engine，别改写成计划语
+    if payload.get("note") and not payload.get("total") and not payload.get("executed"):
+        return                              # 没碰到引擎（registry 不可用等）：保留 drive 的诚实原话
+    if payload.get("dry_run") or payload.get("executed") is False:
+        payload["note"] = _plan_note(payload, restore_path)
+        return
+    if restore_path:
+        payload["note"] = _done_note(payload, restore_mode=True)
+        return
+    rows = []
+    for row in payload.get("targets") or []:
+        if row.get("kind") != "change":
+            continue
+        if row.get("api") is None and row.get("before") is None:
+            continue
+        rows.append({"package": row.get("package"),
+                     "platform": row.get("platform"),
+                     "before": row.get("before"), "after": row.get("after"),
+                     "saved": bool(row.get("saved"))})
+    payload["rollback_entries"] = len(rows)
+    if not rows:
+        payload["note"] = _done_note(payload, restore_mode=False)
+        return
+    try:
+        path = _manifest_path(_unreal_or_none(), payload.get("manifest_for_write"), OP)
+    except Exception as exc:
+        payload["manifest_error"] = type(exc).__name__
+        payload["note"] = _done_note(payload, restore_mode=False)
+        return
+    try:
+        written = _write_json_atomic(path, {"version": MANIFEST_VERSION, "op": OP,
+                                            "entries": rows})
+        payload["manifest_path"] = written
+        payload["rollback_available"] = True
+        payload["note"] = _done_note(payload, restore_mode=False)
+    except Exception as exc:
+        payload["manifest_error"] = type(exc).__name__
+        payload["manifest_path"] = str(path)
+        payload["note"] = (_done_note(payload, restore_mode=False)
+                           + " 回滚清单写入失败(%s)：原值仍在各行 before 里，可手工回滚。"
+                           % type(exc).__name__)
+
+
+def _plan_note(payload, restore_path):
+    n = payload.get("planned") or 0
+    if restore_path:
+        return ("dry-run 回滚计划：将按清单写回 %d 项原值（清单 %s）。"
+                "确认后带 dry_run=False 且 confirm=True 执行。" % (n, restore_path))
+    pot = 0
+    for row in payload.get("targets") or []:
+        if row.get("kind") == "change":
+            pot += int(row.get("potential_triangles") or 0)
+    unmeasured = sum(1 for row in (payload.get("targets") or [])
+                     if row.get("kind") == "change" and not row.get("potential_triangles"))
+    tail = ("（其中 %d 项的建议级超出实测窗口 LOD0-7，未给削减数字）" % unmeasured
+            if unmeasured else "")
+    return ("dry-run 计划：将把 %d 个网格在 %s 平台强制到 Min LOD（合计潜在削减 %d 三角，"
+            "单实例单帧口径，不是 MB%s）。已达标 %d，跳过 %d，失败 %d。"
+            "确认后带 dry_run=False 且 confirm=True 执行；执行时会落一份原值清单可回滚。"
+            % (n, payload.get("platform"), pot, tail, payload.get("no_op") or 0,
+               len(payload.get("skipped") or []), len(payload.get("failed") or [])))
+
+
+def _done_note(payload, restore_mode=False):
+    changed = payload.get("changed") or 0
+    if restore_mode:
+        return ("已按清单回写 %d 项原值（跳过 %d，失败 %d）。复跑 scan_mesh_lod 核对。"
+                % (changed, len(payload.get("skipped") or []),
+                   len(payload.get("failed") or [])))
+    tail = ""
+    if payload.get("rollback_available"):
+        tail = " 回滚清单：%s（restore=<该路径> 双钥执行即写回原值）。" % payload.get("manifest_path")
+    elif payload.get("manifest_error"):
+        tail = " 回滚清单未落盘（%s）。" % payload["manifest_error"]
+    return ("已改 %d 项（已达标 %d，跳过 %d，失败 %d）。Min LOD 是资产属性，改动即刻生效于编辑器内"
+            "预览与后续 cook；复跑 scan_mesh_lod 核对。%s"
+            % (changed, payload.get("no_op") or 0, len(payload.get("skipped") or []),
+               len(payload.get("failed") or []), tail))
+
+
+def _unreal_or_none():
+    try:
+        import unreal
+        return unreal
+    except Exception:
+        return None
