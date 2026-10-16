@@ -232,7 +232,7 @@ import 记录 + 原文件头解析；零写入零保存，取证 JSON 只落工�
   无需旁证即可切分——这是已落地的 D（双假设求解器，POOL_MODEL `v4-cube-dual-hypothesis`）的数据底座。
 - **C 定价修复放弃**：16/16 张 import 记录都有原始文件路径，但 0/16 仍在场（散在桌面/
   外置盘/网盘目录，均已丢失）。在场时读头互验仍可用（Radiance `.hdr` 的 `parse_hdr` 已
-  进 `source_scan.py` 并由 L0 钉住）；另一半价值是「未保留源文件的资产清单」诊断。
+  进 `source_scan.py` 并由 L0 钉住）；另一半价值是「未保留源文件的资产清单」诊断（2026-10-16 已立项，暂名 `scan_missing_source_files`）。
 
 取证工具自身的两条真机教训（脚本已内置）：工程插件可能预加载**旧版 `prism` 占住模块缓存**
 （缺 `streaming` 直接 ImportError）——复测脚本先卸载非仓库来源的 `prism*` 模块再 import；
